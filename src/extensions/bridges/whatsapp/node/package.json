@@ -9,7 +9,7 @@
     "start": "node client.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "7.0.0-rc.9",
+    "@whiskeysockets/baileys": "7.0.0-rc12",
     "pino": "^9.0.0"
   }
 }
