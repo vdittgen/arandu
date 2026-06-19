@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod pro;
 pub mod setup;
 pub mod types;
 
@@ -1451,14 +1452,69 @@ pub(crate) fn load_settings_from_disk() -> Result<AppSettings, String> {
     // (even if false) represent a wizard in progress — respect that value.
     let is_legacy = !contents.contains("onboarding_completed");
 
-    let mut settings: AppSettings =
-        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse settings: {e}"))?;
+    let mut settings: AppSettings = match serde_json::from_str(&contents) {
+        Ok(s) => s,
+        Err(strict_err) => {
+            // A user's settings file must NEVER be silently discarded: the
+            // caller falls back to AppSettings::default() on Err, after
+            // which onboarding overwrites the file — so a single field a
+            // struct change made unreadable (e.g. a new app version, a
+            // Pro-written field, a stray null) would reset the WHOLE config
+            // and bounce the user back through onboarding, losing their
+            // provider choice and prefs. Preserve the original verbatim,
+            // then recover every field that still parses.
+            backup_unparseable_settings(&path, &contents);
+            recover_settings_leniently(&contents).ok_or_else(|| {
+                format!("settings unreadable and unrecoverable: {strict_err}")
+            })?
+        }
+    };
 
     if is_legacy && !settings.onboarding_completed {
         settings.onboarding_completed = true;
         let _ = save_settings_to_disk(&settings);
     }
     Ok(settings)
+}
+
+/// Copy an unparseable settings file aside before any lossy fallback, so
+/// the user's data is never destroyed. Timestamped so repeated failures
+/// don't clobber each other. Best-effort — failure here is non-fatal.
+fn backup_unparseable_settings(path: &std::path::Path, contents: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_file_name(format!("settings.corrupt-{ts}.json"));
+    if let Err(e) = std::fs::write(&backup, contents) {
+        eprintln!("settings backup failed ({}): {e}", backup.display());
+    } else {
+        eprintln!(
+            "settings could not be parsed; original preserved at {}",
+            backup.display(),
+        );
+    }
+}
+
+/// Recover an AppSettings from a partly-incompatible settings object by
+/// keeping every field that still deserializes and letting the rest fall
+/// back to its default. One malformed value can no longer reset the whole
+/// config. Returns `None` only when the file isn't even a JSON object.
+fn recover_settings_leniently(contents: &str) -> Option<AppSettings> {
+    let value: serde_json::Value = serde_json::from_str(contents).ok()?;
+    let obj = value.as_object()?;
+    // Add fields back one at a time, dropping any that break the parse.
+    // Relies on every AppSettings field having a serde default, so a
+    // subset object always deserializes.
+    let mut acc = serde_json::Map::new();
+    for (key, val) in obj {
+        acc.insert(key.clone(), val.clone());
+        let candidate = serde_json::Value::Object(acc.clone());
+        if serde_json::from_value::<AppSettings>(candidate).is_err() {
+            acc.remove(key); // incompatible field → falls back to default
+        }
+    }
+    serde_json::from_value(serde_json::Value::Object(acc)).ok()
 }
 
 fn save_settings_to_disk(settings: &AppSettings) -> Result<(), String> {
@@ -3959,6 +4015,55 @@ pub async fn ask_agent_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_appsettings_parses_from_empty_object() {
+        // Every field now has a serde default, so a subset (or empty)
+        // object must deserialize — the basis for lenient recovery.
+        let s: AppSettings = serde_json::from_str("{}").expect("empty parses");
+        assert_eq!(s.llm_model, "llama3.1:70b");
+        assert_eq!(s.max_sensitivity_tier, 2);
+        assert!(!s.onboarding_completed);
+    }
+
+    #[test]
+    fn test_recover_keeps_healthy_fields_and_drops_bad_one() {
+        // A single malformed field (max_sensitivity_tier as a string)
+        // must NOT reset siblings: onboarding_completed and the provider
+        // choice survive; only the bad field falls back to its default.
+        let contents = r#"{
+            "llm_model": "arandu-pro",
+            "llm_provider": "arandu_cloud",
+            "onboarding_completed": true,
+            "max_sensitivity_tier": "not-a-number",
+            "user_name": "Vinicius"
+        }"#;
+        let s = recover_settings_leniently(contents).expect("recovers");
+        assert_eq!(s.llm_model, "arandu-pro");
+        assert_eq!(s.llm_provider, "arandu_cloud");
+        assert!(s.onboarding_completed);
+        assert_eq!(s.user_name.as_deref(), Some("Vinicius"));
+        // The malformed field fell back to its default, not the whole file.
+        assert_eq!(s.max_sensitivity_tier, 2);
+    }
+
+    #[test]
+    fn test_recover_tolerates_unknown_and_null_fields() {
+        // Unknown future/Pro fields and stray nulls must not nuke config.
+        let contents = r#"{
+            "onboarding_completed": true,
+            "some_future_field": {"nested": 1},
+            "eval_window_hours": null
+        }"#;
+        let s = recover_settings_leniently(contents).expect("recovers");
+        assert!(s.onboarding_completed);
+    }
+
+    #[test]
+    fn test_recover_returns_none_for_non_object() {
+        assert!(recover_settings_leniently("[1,2,3]").is_none());
+        assert!(recover_settings_leniently("not json").is_none());
+    }
 
     #[tokio::test]
     async fn test_app_state_defaults() {
