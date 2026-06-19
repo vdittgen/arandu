@@ -495,10 +495,15 @@ pub struct PipelineProgressEvent {
 /// Application-wide settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default = "default_llm_model")]
     pub llm_model: String,
+    #[serde(default = "default_llm_host")]
     pub llm_host: String,
+    #[serde(default = "default_max_sensitivity_tier")]
     pub max_sensitivity_tier: u8,
+    #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_data_dir")]
     pub data_dir: String,
     #[serde(default = "default_auto_refresh_enabled")]
     pub auto_refresh_enabled: bool,
@@ -636,6 +641,31 @@ fn default_refresh_interval() -> u32 {
     60
 }
 
+// The five core fields below used to have no serde default, so a
+// settings file missing (or malformed in) ANY one of them failed to
+// deserialize as a whole — which, combined with the lenient recovery in
+// `load_settings_from_disk`, must never reset the entire config. Giving
+// them defaults lets a partial/recovered object always deserialize.
+fn default_llm_model() -> String {
+    "llama3.1:70b".to_string()
+}
+
+fn default_llm_host() -> String {
+    "http://localhost:11434".to_string()
+}
+
+fn default_max_sensitivity_tier() -> u8 {
+    2
+}
+
+fn default_theme() -> String {
+    "light".to_string()
+}
+
+fn default_data_dir() -> String {
+    "~/.arandu/data".to_string()
+}
+
 fn default_auto_refresh_enabled() -> bool {
     true
 }
@@ -664,11 +694,11 @@ impl Default for AppSettings {
             // (onboarding wizard / Settings) but not guaranteed. Requires a
             // capable machine (Apple Silicon Ultra, 64–128 GB RAM) — on weaker
             // hardware it can starve the OS, hence the warnings in the wizard.
-            llm_model: "llama3.1:70b".to_string(),
-            llm_host: "http://localhost:11434".to_string(),
-            max_sensitivity_tier: 2,
-            theme: "light".to_string(),
-            data_dir: "~/.arandu/data".to_string(),
+            llm_model: default_llm_model(),
+            llm_host: default_llm_host(),
+            max_sensitivity_tier: default_max_sensitivity_tier(),
+            theme: default_theme(),
+            data_dir: default_data_dir(),
             auto_refresh_enabled: default_auto_refresh_enabled(),
             auto_refresh_interval_minutes: default_refresh_interval(),
             refresh_on_launch: false,
