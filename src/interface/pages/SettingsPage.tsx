@@ -770,6 +770,15 @@ function PrivacySection({
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  // Tauri command rejections arrive as the raw error string (the `Err`
+  // side of the command's `Result<_, String>`), not an Error instance.
+  const errMessage = (err: unknown, fallback: string): string =>
+    typeof err === "string"
+      ? err
+      : err instanceof Error
+        ? err.message
+        : fallback;
+
   const handleExport = useCallback(async () => {
     setExporting(true);
     setExportError(null);
@@ -784,9 +793,7 @@ function PrivacySection({
         setExportError(res.error ?? "Export failed.");
       }
     } catch (err) {
-      setExportError(
-        err instanceof Error ? err.message : "Export failed.",
-      );
+      setExportError(errMessage(err, "Export failed."));
     } finally {
       setExporting(false);
     }
@@ -808,7 +815,7 @@ function PrivacySection({
         setDeleting(false);
       }
     } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : "Delete failed.");
+      setDeleteError(errMessage(err, "Delete failed."));
       setDeleting(false);
     }
   }, []);
