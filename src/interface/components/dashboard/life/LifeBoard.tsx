@@ -209,7 +209,9 @@ function Column({ spec, data }: ColumnProps) {
             </span>
             {items.length === 0 ? (
               <p className="py-1 text-[11px] text-faint">
-                No events in this domain today.
+                {spec.id === "health"
+                  ? "No health connector yet — steps, sleep, and workouts will appear here once one ships."
+                  : "No events in this domain today."}
               </p>
             ) : (
               <DomainTimeline items={items} />

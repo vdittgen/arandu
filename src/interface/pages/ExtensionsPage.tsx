@@ -246,7 +246,7 @@ function StatusBadge({ status }: { readonly status: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Toggle (same as DataSourcesPage)
+// Toggle
 // ---------------------------------------------------------------------------
 
 function Toggle({
