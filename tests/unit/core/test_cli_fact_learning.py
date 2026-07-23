@@ -94,6 +94,7 @@ class TestMaybeLearnFacts:
             layer,
             "My favorite food is sushi.",
             "Great, I'll remember you love sushi!",
+            session_id="s1",
         )
         rows = _active_facts(layer.duckdb)
         assert len(rows) == 1
@@ -102,20 +103,34 @@ class TestMaybeLearnFacts:
     def test_forwards_both_messages_to_extractor(
         self, layer, stub_extract,
     ) -> None:
-        cli_mod._maybe_learn_facts(layer, "I live in Berlin.", "Noted!")
+        cli_mod._maybe_learn_facts(
+            layer, "I live in Berlin.", "Noted!", session_id="s1",
+        )
         conversation = stub_extract.call_args.args[0]
         assert "I live in Berlin." in conversation
         assert "Noted!" in conversation
 
+    def test_no_session_is_noop(self, layer, stub_extract) -> None:
+        """Session-less internal asks (ask_brain_internal) must not learn."""
+        cli_mod._maybe_learn_facts(
+            layer, "internal prompt", "internal reply", session_id=None,
+        )
+        cli_mod._maybe_learn_facts(
+            layer, "internal prompt", "internal reply", session_id="",
+        )
+        stub_extract.assert_not_called()
+
     def test_empty_assistant_text_is_noop(self, layer, stub_extract) -> None:
         # No extractor call, no table touched — returns before building
         # the FactLearner at all.
-        cli_mod._maybe_learn_facts(layer, "Hello", None)
-        cli_mod._maybe_learn_facts(layer, "Hello", "")
+        cli_mod._maybe_learn_facts(layer, "Hello", None, session_id="s1")
+        cli_mod._maybe_learn_facts(layer, "Hello", "", session_id="s1")
         stub_extract.assert_not_called()
 
     def test_empty_user_message_is_noop(self, layer, stub_extract) -> None:
-        cli_mod._maybe_learn_facts(layer, "", "Some reply")
+        cli_mod._maybe_learn_facts(
+            layer, "", "Some reply", session_id="s1",
+        )
         stub_extract.assert_not_called()
 
     def test_disabled_setting_skips_extraction(
@@ -125,7 +140,22 @@ class TestMaybeLearnFacts:
             "src.models.llm_provider.load_llm_settings",
             lambda: {"learn_facts_from_chat": False},
         )
-        cli_mod._maybe_learn_facts(layer, "I like tea.", "Nice.")
+        cli_mod._maybe_learn_facts(
+            layer, "I like tea.", "Nice.", session_id="s1",
+        )
+        stub_extract.assert_not_called()
+
+    def test_disabled_by_hand_edited_string(
+        self, layer, stub_extract, monkeypatch,
+    ) -> None:
+        """A hand-edited "false" string in settings.json also disables it."""
+        monkeypatch.setattr(
+            "src.models.llm_provider.load_llm_settings",
+            lambda: {"learn_facts_from_chat": "false"},
+        )
+        cli_mod._maybe_learn_facts(
+            layer, "I like tea.", "Nice.", session_id="s1",
+        )
         stub_extract.assert_not_called()
 
     def test_extractor_failure_is_swallowed(
@@ -134,7 +164,9 @@ class TestMaybeLearnFacts:
         """A failing LLM extraction must never break the chat turn."""
         stub_extract.side_effect = RuntimeError("LLM down")
         # Must not raise.
-        cli_mod._maybe_learn_facts(layer, "I like tea.", "Nice.")
+        cli_mod._maybe_learn_facts(
+            layer, "I like tea.", "Nice.", session_id="s1",
+        )
         assert _active_facts(layer.duckdb) == []
 
     def test_enabled_by_default_when_setting_absent(
@@ -145,7 +177,9 @@ class TestMaybeLearnFacts:
             "src.models.llm_provider.load_llm_settings",
             lambda: {},
         )
-        cli_mod._maybe_learn_facts(layer, "I use vim.", "Cool.")
+        cli_mod._maybe_learn_facts(
+            layer, "I use vim.", "Cool.", session_id="s1",
+        )
         assert len(_active_facts(layer.duckdb)) == 1
 
 
@@ -180,3 +214,81 @@ class TestEmitStreamReturn:
         """Text is returned for unsaved asks (no layer/session) too."""
         chunks = [{"type": "token", "token": "hi"}]
         assert cli_mod._emit_stream(iter(chunks), layer=None) == "hi"
+
+
+# ================================================================
+# cmd_ask wiring — guards the "call site missing" regression that
+# was the whole bug (#37): the learner existed but nothing invoked it.
+# ================================================================
+
+
+class TestCmdAskWiring:
+    def _patch_brain(self, monkeypatch, answer: str = "Sure.") -> None:
+        """Stub out cmd_ask's heavy deps so only the wiring is exercised."""
+        resp = SimpleNamespace(
+            answer=answer, sources=[], context_summary="",
+            model="m", latency_ms=1.0,
+        )
+        brain = MagicMock()
+        brain.ask.return_value = resp
+        monkeypatch.setattr(
+            "src.agents.brain.BrainAgentV2", lambda **k: brain,
+        )
+        monkeypatch.setattr(
+            "src.core.query_engine.QueryEngine", lambda **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "src.core.chat_store.ChatStore", lambda *a, **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "src.agents.tool_registry.ToolRegistry", lambda **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "src.extensions.connectors.catalog.ConnectorCatalog",
+            lambda *a, **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "src.extensions.connectors.registry.ExtensionRegistry",
+            lambda *a, **k: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "src.models.llm_provider.create_provider_from_settings",
+            lambda **k: MagicMock(),
+        )
+
+    def test_cmd_ask_invokes_fact_learning_with_session(
+        self, monkeypatch,
+    ) -> None:
+        self._patch_brain(monkeypatch, answer="You love sushi.")
+        spy = MagicMock()
+        monkeypatch.setattr(cli_mod, "_maybe_learn_facts", spy)
+
+        fake_layer = SimpleNamespace(
+            duckdb=MagicMock(), kuzu=MagicMock(), chromadb=MagicMock(),
+        )
+        code = cli_mod.cmd_ask(
+            fake_layer, "I love sushi", session_id="sess-1",
+        )
+
+        assert code == 0
+        spy.assert_called_once()
+        assert spy.call_args.args[1] == "I love sushi"
+        assert spy.call_args.args[2] == "You love sushi."
+        assert spy.call_args.kwargs["session_id"] == "sess-1"
+
+    def test_cmd_ask_passes_none_session_for_internal_asks(
+        self, monkeypatch,
+    ) -> None:
+        """Session-less ask_brain_internal path forwards session_id=None,
+        which _maybe_learn_facts then treats as a no-op."""
+        self._patch_brain(monkeypatch)
+        spy = MagicMock()
+        monkeypatch.setattr(cli_mod, "_maybe_learn_facts", spy)
+
+        fake_layer = SimpleNamespace(
+            duckdb=MagicMock(), kuzu=MagicMock(), chromadb=MagicMock(),
+        )
+        cli_mod.cmd_ask(fake_layer, "widget prompt")
+
+        spy.assert_called_once()
+        assert spy.call_args.kwargs["session_id"] is None

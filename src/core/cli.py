@@ -1358,15 +1358,20 @@ def _emit_stream(
 def _fact_learning_enabled() -> bool:
     """Whether to extract personal facts from chat turns (default: on).
 
-    Only an explicit ``learn_facts_from_chat: false`` in settings.json
-    disables it, so existing installs opt in automatically.
+    Disabled only by an explicit falsy ``learn_facts_from_chat`` in
+    settings.json — a real boolean ``false`` or a hand-edited string
+    like ``"false"``/``"off"``/``"0"`` — so existing installs opt in
+    automatically.
 
     sensitivity_tier: 1
     """
     try:
         from src.models.llm_provider import load_llm_settings
 
-        return load_llm_settings().get("learn_facts_from_chat", True) is not False
+        val = load_llm_settings().get("learn_facts_from_chat", True)
+        if isinstance(val, str):
+            return val.strip().lower() not in {"false", "0", "no", "off", ""}
+        return bool(val)
     except Exception:  # noqa: BLE001
         return True
 
@@ -1375,6 +1380,8 @@ def _maybe_learn_facts(
     layer: DataLayer,
     user_message: str,
     assistant_text: str | None,
+    *,
+    session_id: str | None,
 ) -> None:
     """Extract personal facts from a finished conversational turn.
 
@@ -1384,15 +1391,21 @@ def _maybe_learn_facts(
     this call the table stays empty and the app never "learns" about
     the user from conversation.
 
-    Runs only after the reply has fully reached the user (the frontend
-    ends a turn on the ``done`` chunk, not on process exit), so the
-    extra LLM extraction pass never delays the visible response.
-    Best-effort: any failure is logged and swallowed, and it can be
-    turned off via the ``learn_facts_from_chat`` setting.
+    Gated on ``session_id``: only genuine user chat turns carry an
+    active chat session. Internal/background asks (dashboard widgets,
+    helpers — ``ask_brain_internal``) run session-less and must *not*
+    train long-term memory with system-generated prompts. Gating here
+    also keeps the synchronous ``cmd_ask`` path from adding an LLM
+    round-trip to those internal calls (which are read via
+    ``wait_with_output`` under a bounded timeout).
+
+    Best-effort: any failure is logged and swallowed so it can never
+    break a chat turn, and it can be turned off via the
+    ``learn_facts_from_chat`` setting.
 
     sensitivity_tier: 3
     """
-    if not user_message or not assistant_text:
+    if not session_id or not user_message or not assistant_text:
         return
     try:
         if not _fact_learning_enabled():
@@ -1494,7 +1507,9 @@ def cmd_ask_stream(
                 session_id=session_id,
             )
             # Learn facts after the reply has fully streamed to the user.
-            _maybe_learn_facts(layer, question, assistant_text)
+            _maybe_learn_facts(
+                layer, question, assistant_text, session_id=session_id,
+            )
             return 0
 
         if agent_id and agent_id != "brain":
@@ -1527,7 +1542,9 @@ def cmd_ask_stream(
             session_id=session_id,
         )
         # Learn facts after the reply has fully streamed to the user.
-        _maybe_learn_facts(layer, question, assistant_text)
+        _maybe_learn_facts(
+            layer, question, assistant_text, session_id=session_id,
+        )
         return 0
     except Exception as exc:
         # The error chunk we just emitted already surfaces to the user
@@ -1992,8 +2009,12 @@ def cmd_ask(
                 model=resp.model,
             )
         print(_json_output(result))
-        # Learn facts after the answer is emitted — never blocks it.
-        _maybe_learn_facts(layer, question, resp.answer)
+        # Learn facts after the answer JSON is emitted. Gated on
+        # session_id: session-less internal asks (ask_brain_internal —
+        # widgets/background) must not train memory, and this path is
+        # read synchronously via wait_with_output, so gating also keeps
+        # the extra LLM pass off those bounded-timeout internal calls.
+        _maybe_learn_facts(layer, question, resp.answer, session_id=session_id)
         return 0
     except Exception as exc:
         print(_json_output({"error": str(exc)}), file=sys.stderr)
