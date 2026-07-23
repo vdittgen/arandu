@@ -10,7 +10,7 @@ sensitivity_tier: N/A — test infrastructure
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -103,6 +103,15 @@ class TestWithinWindow:
     def test_tolerates_space_separated(self) -> None:
         assert _within_window("2026-07-23 14:00:00", _NOW, 24.0)
 
+    def test_utc_z_suffix_is_converted_to_local(self) -> None:
+        """The mart stores UTC ``…Z`` starts; a UTC start equal to
+        local-now + 2h must land in the window regardless of the
+        machine's timezone (would fail if tzinfo were merely stripped)."""
+        local_now = datetime(2026, 7, 23, 12, 0)  # naive local
+        utc_start = (local_now + timedelta(hours=2)).astimezone(timezone.utc)
+        z = utc_start.isoformat().replace("+00:00", "Z")
+        assert _within_window(z, local_now, 24.0)
+
 
 # ================================================================
 # get_meeting_prep_briefs
@@ -161,6 +170,15 @@ class TestMeetingPrepBriefs:
     def test_no_mart_returns_empty(self, db) -> None:
         """Absent enriched-events mart (pipeline never ran) → no briefs."""
         pi = ProactiveIntelligence(db_engine=db)
+        assert pi.get_meeting_prep_briefs(within_hours=24, now=_NOW) == []
+
+    def test_contextless_meeting_is_skipped(self, db) -> None:
+        """A solo hold / all-name-only attendees carry no prep value."""
+        pi = ProactiveIntelligence(db_engine=db)
+        # Event with a known attendee name but no cached context/topics.
+        _seed_event(
+            db, start=_NOW + timedelta(hours=2), attendees="Some Person",
+        )
         assert pi.get_meeting_prep_briefs(within_hours=24, now=_NOW) == []
 
     def test_briefs_sorted_soonest_first(self, db) -> None:

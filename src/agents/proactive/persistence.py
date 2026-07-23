@@ -94,6 +94,23 @@ def _extract_email_addr(raw: str) -> str:
     return candidate
 
 
+def _to_local_naive(dt: datetime) -> datetime:
+    """Normalize to a naive *local* datetime for comparison.
+
+    An aware value (the mart stores UTC ``…Z`` start times) is
+    converted to the machine's local zone before dropping tzinfo; a
+    naive value is assumed already-local and passed through. This keeps
+    the window check correct against a naive-local ``now`` — comparing
+    a UTC wall-clock directly would shift every event by the local UTC
+    offset.
+
+    sensitivity_tier: 1
+    """
+    if dt.tzinfo is not None:
+        return dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
 def _within_window(start_time: str, now: datetime, within_hours: float) -> bool:
     """True if ``start_time`` falls in ``(now, now + within_hours]``.
 
@@ -112,11 +129,8 @@ def _within_window(start_time: str, now: datetime, within_hours: float) -> bool:
             dt = datetime.fromisoformat(raw[:19].replace("T", " "))
         except ValueError:
             return False
-    # Compare naively — the mart stores local wall-clock start times and
-    # ``now`` defaults to a naive local now; drop any tzinfo to match.
-    if dt.tzinfo is not None:
-        dt = dt.replace(tzinfo=None)
-    ref = now.replace(tzinfo=None) if now.tzinfo is not None else now
+    dt = _to_local_naive(dt)
+    ref = _to_local_naive(now)
     delta_h = (dt - ref).total_seconds() / 3600.0
     return 0 < delta_h <= within_hours
 
@@ -2327,7 +2341,13 @@ class ProactiveIntelligence:
                     ),
                     open_loops=loops_by_contact.get(key, []),
                 ))
-            if not attendees:
+            # A brief where no attendee carries any situation, open loop,
+            # or last message is a contextless name echo (e.g. a solo
+            # calendar hold) — skip it rather than clutter the surface.
+            if not any(
+                a.situation or a.open_loops or a.last_message_preview
+                for a in attendees
+            ):
                 continue
             briefs.append(MeetingPrepBrief(
                 event_id=str(r.get("id") or ""),
