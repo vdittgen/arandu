@@ -12,7 +12,7 @@ sensitivity_tier: 2
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date as date_cls
 from typing import Any
 
@@ -184,7 +184,9 @@ class TaskCurator:
             )
             if should_archive(decay):
                 update_goal_fields(self._db, goal.id, status="archived")
-                archived.append(goal)
+                # Return the post-archive snapshot so the reported goal's
+                # status matches what's now persisted.
+                archived.append(replace(goal, status="archived"))
         if archived:
             logger.info(
                 "Goal decay archived %d stale brain goal(s)", len(archived),

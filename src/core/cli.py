@@ -5084,7 +5084,7 @@ def cmd_projects_digest(layer: DataLayer, category: str | None) -> int:
             overdue = sum(
                 1
                 for t in tasks
-                if t.status != "done"
+                if t.status in ("todo", "in_progress")
                 and t.due_at
                 and str(t.due_at)[:10] < today_iso
             )

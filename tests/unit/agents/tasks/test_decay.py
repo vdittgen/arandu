@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+from src.agents.core.output_types import GoalBatch, GoalDraft
 from src.agents.tasks import TaskCurator
 from src.agents.tasks.decay import (
     ARCHIVE_AFTER_DAYS,
@@ -169,3 +171,71 @@ class TestDecayGoalsPass:
 
         curator.update_goal(g.id, status="active")
         assert curator.get_goal(g.id).status == "active"
+
+    def test_returned_snapshot_reflects_archived_status(
+        self, curator, db,
+    ) -> None:
+        """The reported goal's status matches what was persisted."""
+        g = curator.create_goal(
+            title="Stale", category="work", source="brain",
+        )
+        old = (datetime.now(timezone.utc)
+               - timedelta(days=ARCHIVE_AFTER_DAYS + 1)).isoformat()
+        update_goal_fields(db, g.id, last_confirmed_at=old)
+        [archived] = curator.decay_goals()
+        assert archived.status == "archived"
+
+
+class TestMineGoalsRunsDecay:
+    """The decay pass is wired into the mining cadence, and a goal
+    re-confirmed in the same pass is spared."""
+
+    def test_mining_archives_stale_but_spares_reconfirmed(
+        self, curator, db, monkeypatch,
+    ) -> None:
+        # One goal the upcoming mining pass will re-confirm…
+        keep = curator.create_goal(
+            title="Ship v1", category="work", source="brain",
+        )
+        # …and one it won't mention, already past the archive line.
+        drop = curator.create_goal(
+            title="Learn cello", category="work", source="brain",
+        )
+        old = (datetime.now(timezone.utc)
+               - timedelta(days=ARCHIVE_AFTER_DAYS + 5)).isoformat()
+        # Backdate BOTH so only the reconfirm (not recency) saves `keep`.
+        update_goal_fields(db, keep.id, last_confirmed_at=old)
+        update_goal_fields(db, drop.id, last_confirmed_at=old)
+
+        drafts = GoalBatch(goals=[
+            GoalDraft(
+                title="Ship v1",  # dedups onto `keep` -> reconfirms it
+                description="",
+                category="work",
+                horizon="short",
+                importance=8,
+                why="",
+                source_kind="message",
+                source_ref="m1",
+                linked_topic_hint=None,
+            ),
+        ])
+        monkeypatch.setattr(
+            "src.agents.goal_extractor.agent.GoalExtractorAgent",
+            MagicMock(
+                return_value=MagicMock(
+                    extract=MagicMock(return_value=drafts),
+                ),
+            ),
+        )
+        monkeypatch.setattr(
+            curator, "_fetch_recent_messages", lambda n: [{"id": "m1"}],
+        )
+        monkeypatch.setattr(curator, "_fetch_recent_notes", lambda n: [])
+        monkeypatch.setattr(curator, "_fetch_recent_facts", lambda n: [])
+
+        curator.mine_goals()
+
+        # Reconfirmed goal survived; unmentioned stale goal was archived.
+        assert curator.get_goal(keep.id).status == "active"
+        assert curator.get_goal(drop.id).status == "archived"
