@@ -2615,6 +2615,15 @@ pub struct Goal {
     /// and horizon so the dashboard can rank goals by what's pressing.
     #[serde(default)]
     pub urgency_score: i32,
+    /// Decay verdict for a brain-mined goal whose evidence has gone
+    /// stale (`fresh` / `fading` / `stale`). Always `fresh` for
+    /// user-entered goals. Derived at list-time; not persisted.
+    #[serde(default = "default_fresh_decay")]
+    pub decay_state: String,
+    /// Days since the goal's evidence anchor (`last_confirmed_at`, else
+    /// `created_at`). Derived at list-time; not persisted.
+    #[serde(default)]
+    pub days_since_confirmed: i32,
 }
 
 /// A grouping of tasks. May roll up under a goal or topic.
@@ -2751,6 +2760,9 @@ fn default_todo_status() -> String {
 }
 fn default_user_source() -> String {
     "user".to_string()
+}
+fn default_fresh_decay() -> String {
+    "fresh".to_string()
 }
 fn default_daily_cadence() -> String {
     "daily".to_string()

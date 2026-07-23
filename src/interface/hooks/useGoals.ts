@@ -15,7 +15,12 @@ import { useAsyncData, type AsyncDataResult } from "./useAsyncData";
 
 export type GoalCategory = "personal" | "life" | "work";
 export type GoalHorizon = "short" | "medium" | "long";
-export type GoalStatus = "active" | "paused" | "achieved" | "abandoned";
+export type GoalStatus =
+  | "active"
+  | "paused"
+  | "achieved"
+  | "abandoned"
+  | "archived";
 export type GoalSource = "user" | "brain";
 
 export interface Goal {
@@ -40,6 +45,14 @@ export interface Goal {
    * dashboard ordering; the Goals page can still group by category.
    */
   readonly urgency_score: number;
+  /**
+   * Decay verdict for a brain-mined goal whose evidence has gone stale
+   * ("fading"/"stale"). Always "fresh" for user goals. Derived at
+   * list-time. Use to fade or badge dormant mined goals.
+   */
+  readonly decay_state: "fresh" | "fading" | "stale";
+  /** Days since the goal's evidence anchor. Derived at list-time. */
+  readonly days_since_confirmed: number;
 }
 
 export interface GoalCreatePayload {

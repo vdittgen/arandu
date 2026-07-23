@@ -4905,6 +4905,8 @@ def cmd_goals_list(
             status=status or None, category=category or None,
         )
 
+        from src.agents.tasks.decay import goal_decay
+
         enriched: list[dict[str, Any]] = []
         for g in goals:
             try:
@@ -4914,14 +4916,25 @@ def cmd_goals_list(
                 streak = int(progress.get("habit_streak_days", 0))
             except Exception:  # noqa: BLE001
                 tasks_today, overdue, streak = 0, 0, 0
+            decay = goal_decay(
+                source=g.source,
+                last_confirmed_at=g.last_confirmed_at,
+                created_at=g.created_at,
+            )
             urgency = _compute_goal_urgency(
                 horizon=g.horizon,
                 target_date=g.target_date,
                 tasks_today=tasks_today,
                 overdue_tasks=overdue,
                 habit_streak_days=streak,
+                decay_penalty=decay.penalty,
             )
-            enriched.append({**asdict(g), "urgency_score": urgency})
+            enriched.append({
+                **asdict(g),
+                "urgency_score": urgency,
+                "decay_state": decay.state,
+                "days_since_confirmed": decay.days_since_confirmed,
+            })
 
         enriched.sort(
             key=lambda d: (
@@ -5006,6 +5019,27 @@ def cmd_goals_mine(layer: DataLayer) -> int:
         return 1
 
 
+def cmd_goals_decay(layer: DataLayer) -> int:
+    """Run the goal-decay pass: auto-archive stale brain-mined goals.
+
+    This also runs automatically at the end of each goal-mining cycle;
+    the command exposes it for manual and tested invocation. Returns the
+    goals archived this pass. The review queue is
+    ``goals-list --status archived``; restore a goal with
+    ``goals-update <id> '{"status": "active"}'``.
+
+    sensitivity_tier: 2
+    """
+    try:
+        curator = _task_curator(layer)
+        archived = curator.decay_goals()
+        print(_dataclass_list_json(archived))
+        return 0
+    except Exception as exc:
+        print(_json_output({"error": str(exc)}), file=sys.stderr)
+        return 1
+
+
 def cmd_projects_list(
     layer: DataLayer, status: str | None, category: str | None,
 ) -> int:
@@ -5016,6 +5050,63 @@ def cmd_projects_list(
             status=status or None, category=category or None,
         )
         print(_dataclass_list_json(projects))
+        return 0
+    except Exception as exc:
+        print(_json_output({"error": str(exc)}), file=sys.stderr)
+        return 1
+
+
+def cmd_projects_digest(layer: DataLayer, category: str | None) -> int:
+    """Per-project rollup for users juggling many projects.
+
+    For each active project, aggregates its tasks by status into a
+    completion percentage + open/overdue counts, and names the goal it
+    rolls up under — a one-glance status board. Sorted by open work
+    (then size) so the projects needing attention surface first.
+
+    sensitivity_tier: 2
+    """
+    try:
+        today_iso = date.today().isoformat()
+        curator = _task_curator(layer)
+        projects = curator.list_projects(
+            status="active", category=category or None,
+        )
+
+        digest: list[dict[str, Any]] = []
+        for p in projects:
+            tasks = curator.list_tasks(project_id=p.id)
+            total = len(tasks)
+            done = sum(1 for t in tasks if t.status == "done")
+            open_tasks = sum(
+                1 for t in tasks if t.status in ("todo", "in_progress")
+            )
+            overdue = sum(
+                1
+                for t in tasks
+                if t.status != "done"
+                and t.due_at
+                and str(t.due_at)[:10] < today_iso
+            )
+            goal = curator.get_goal(p.goal_id) if p.goal_id else None
+            digest.append({
+                "project_id": p.id,
+                "name": p.name,
+                "category": p.category,
+                "goal_id": p.goal_id,
+                "goal_title": goal.title if goal else None,
+                "task_total": total,
+                "task_done": done,
+                "task_open": open_tasks,
+                "task_overdue": overdue,
+                "progress_pct": round(100 * done / total) if total else 0,
+            })
+
+        digest.sort(
+            key=lambda d: (d["task_overdue"], d["task_open"], d["task_total"]),
+            reverse=True,
+        )
+        print(_json_output(digest))
         return 0
     except Exception as exc:
         print(_json_output({"error": str(exc)}), file=sys.stderr)
@@ -6118,6 +6209,8 @@ def cmd_get_life_board(layer: DataLayer) -> int:
     try:
         from dataclasses import asdict
 
+        from src.agents.tasks.decay import goal_decay
+
         curator = _task_curator(layer)
         all_goals = curator.list_goals(status="active")
 
@@ -6145,6 +6238,11 @@ def cmd_get_life_board(layer: DataLayer) -> int:
                     }
                 tasks_today = progress.get("tasks_today", [])
                 habits_today = progress.get("habits_today", [])
+                decay = goal_decay(
+                    source=g.source,
+                    last_confirmed_at=g.last_confirmed_at,
+                    created_at=g.created_at,
+                )
                 urgency = _compute_goal_urgency(
                     horizon=g.horizon,
                     target_date=g.target_date,
@@ -6153,10 +6251,13 @@ def cmd_get_life_board(layer: DataLayer) -> int:
                     habit_streak_days=int(
                         progress.get("habit_streak_days", 0),
                     ),
+                    decay_penalty=decay.penalty,
                 )
                 enriched_goals.append({
                     **asdict(g),
                     "urgency_score": urgency,
+                    "decay_state": decay.state,
+                    "days_since_confirmed": decay.days_since_confirmed,
                 })
                 today_progress[g.id] = {
                     "total": (
@@ -6511,13 +6612,17 @@ def _compute_goal_urgency(
     tasks_today: int,
     overdue_tasks: int,
     habit_streak_days: int,
+    decay_penalty: int = 0,
 ) -> int:
     """Deterministic urgency score for goal ordering.
 
     Weights tasks due today highest, then overdue work, then near-term
     target dates, then horizon, with a tiny bonus for an active habit
     streak so an actively-worked-on goal beats a dormant one with the
-    same task count. Pure function — testable in isolation.
+    same task count. ``decay_penalty`` (from a brain-mined goal whose
+    evidence has gone stale — see ``src.agents.tasks.decay``) is
+    subtracted so fading goals sink beneath actively-confirmed ones.
+    Pure function — testable in isolation.
 
     sensitivity_tier: 1
     """
@@ -6542,7 +6647,7 @@ def _compute_goal_urgency(
             pass
     if habit_streak_days > 0:
         score += 1
-    return score
+    return max(0, score - max(0, decay_penalty))
 
 
 def cmd_goal_progress(layer: DataLayer, goal_id: str) -> int:
@@ -9095,12 +9200,20 @@ def build_parser() -> argparse.ArgumentParser:
         "goals-mine",
         help="Run the goal extractor over recent evidence (JSON)",
     )
+    subparsers.add_parser(
+        "goals-decay",
+        help="Auto-archive stale brain-mined goals (JSON)",
+    )
 
     p_proj_list = subparsers.add_parser(
         "projects-list", help="List projects (JSON)",
     )
     p_proj_list.add_argument("--status", default="active")
     p_proj_list.add_argument("--category", default=None)
+    p_proj_digest = subparsers.add_parser(
+        "projects-digest", help="Per-project task rollup (JSON)",
+    )
+    p_proj_digest.add_argument("--category", default=None)
     p_proj_create = subparsers.add_parser(
         "projects-create", help="Create a project",
     )
@@ -10157,10 +10270,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "goals-mine":
             return cmd_goals_mine(layer)
+        if args.command == "goals-decay":
+            return cmd_goals_decay(layer)
         if args.command == "projects-list":
             return cmd_projects_list(
                 layer, args.status, args.category,
             )
+        if args.command == "projects-digest":
+            return cmd_projects_digest(layer, args.category)
         if args.command == "projects-create":
             return cmd_projects_create(
                 layer,
