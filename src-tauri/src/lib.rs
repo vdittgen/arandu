@@ -139,6 +139,9 @@ pub fn run() {
             commands::update_skill_v2,
             commands::delete_skill_v2,
             commands::ask_agent_stream,
+            // Data ownership (Settings › Privacy)
+            commands::export_user_data,
+            commands::delete_all_user_data,
             // Action tool commands
             commands::get_available_actions,
             commands::confirm_action,

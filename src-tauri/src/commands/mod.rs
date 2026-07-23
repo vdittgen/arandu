@@ -3967,6 +3967,37 @@ pub async fn delete_skill_v2(
         .map_err(|e| format!("Failed to parse skills-delete-v2 JSON: {e}"))
 }
 
+/// Export all local user data to an inspectable JSON zip archive.
+///
+/// Returns `{ ok, path, tables, total_rows, bytes }`; the frontend
+/// surfaces `path` so the user can find and inspect the archive.
+///
+/// # sensitivity_tier: 3
+#[tauri::command]
+pub async fn export_user_data(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let output = call_python_cli(&["export-data"], &state.project_root).await?;
+    serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse export-data JSON: {e}"))
+}
+
+/// Permanently delete all local user data — the SQLite/Kuzu/Chroma
+/// stores, learned facts, goals & tasks, the audit chain, sessions,
+/// and derived caches. App preferences are preserved so the app stays
+/// launchable and restarts into a fresh, empty state.
+///
+/// # sensitivity_tier: 3
+#[tauri::command]
+pub async fn delete_all_user_data(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let output =
+        call_python_cli(&["delete-all-data"], &state.project_root).await?;
+    serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse delete-all-data JSON: {e}"))
+}
+
 /// Stream a question to a specific agent (Brain or a user-authored agent).
 ///
 /// Mirrors :command:`ask_brain_stream` but accepts an ``agentId``. The

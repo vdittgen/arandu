@@ -759,6 +759,60 @@ function PrivacySection({
   const [showEnableModal, setShowEnableModal] = useState(false);
   const [togglingOff, setTogglingOff] = useState(false);
 
+  // Export data
+  const [exporting, setExporting] = useState(false);
+  const [exportPath, setExportPath] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  // Delete all data (type-to-confirm)
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleExport = useCallback(async () => {
+    setExporting(true);
+    setExportError(null);
+    setExportPath(null);
+    try {
+      const res = await invoke<{ ok: boolean; path?: string; error?: string }>(
+        "export_user_data",
+      );
+      if (res.ok && res.path) {
+        setExportPath(res.path);
+      } else {
+        setExportError(res.error ?? "Export failed.");
+      }
+    } catch (err) {
+      setExportError(
+        err instanceof Error ? err.message : "Export failed.",
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, []);
+
+  const handleDelete = useCallback(async () => {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const res = await invoke<{ ok: boolean; error?: string }>(
+        "delete_all_user_data",
+      );
+      if (res.ok) {
+        // Everything is gone — reload into a fresh, empty app so no
+        // stale in-memory state lingers.
+        window.location.reload();
+      } else {
+        setDeleteError(res.error ?? "Delete failed.");
+        setDeleting(false);
+      }
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Delete failed.");
+      setDeleting(false);
+    }
+  }, []);
+
   const handleLocalInferenceToggle = useCallback(
     async (next: boolean) => {
       if (next) {
@@ -855,28 +909,94 @@ function PrivacySection({
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-2 border-t border-hairline pt-4">
-          <button
-            disabled
-            className="flex items-center gap-2 rounded-2 border border-hairline px-4 py-2 text-xs text-muted cursor-not-allowed opacity-60"
-            title="Coming soon"
-          >
-            <Download className="h-3.5 w-3.5" />
-            Export data (JSON)
-            <span className="ml-1 rounded bg-surface px-1.5 py-0.5 text-[10px]">Soon</span>
-          </button>
+        <div className="border-t border-hairline pt-4">
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={handleExport}
+              disabled={exporting}
+              className="flex items-center gap-2 rounded-2 border border-hairline px-4 py-2 text-xs text-ink transition-colors hover:bg-surface disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Download className="h-3.5 w-3.5" />
+              {exporting ? "Exporting…" : "Export data (JSON)"}
+            </button>
 
-          <button
-            disabled
-            className="flex items-center gap-2 rounded-2 border border-hairline px-4 py-2 text-xs text-danger/60 cursor-not-allowed opacity-60"
-            title="Coming soon"
-          >
-            <Trash2 className="h-3.5 w-3.5" strokeWidth={1.6} />
-            Delete all my data
-            <span className="ml-1 rounded bg-surface px-1.5 py-0.5 text-[10px] text-muted">Soon</span>
-          </button>
+            <button
+              onClick={() => {
+                setDeleteConfirm("");
+                setDeleteError(null);
+                setShowDeleteModal(true);
+              }}
+              className="flex items-center gap-2 rounded-2 border border-danger/30 px-4 py-2 text-xs text-danger transition-colors hover:bg-danger/5"
+            >
+              <Trash2 className="h-3.5 w-3.5" strokeWidth={1.6} />
+              Delete all my data
+            </button>
+          </div>
+
+          {exportPath && (
+            <p className="mt-2 break-all text-[11px] text-muted">
+              Exported to <span className="text-ink">{exportPath}</span>
+            </p>
+          )}
+          {exportError && (
+            <p className="mt-2 text-[11px] text-danger">{exportError}</p>
+          )}
+          <p className="mt-2 text-[11px] text-muted">
+            Export bundles every local table into an inspectable JSON zip.
+            Delete permanently wipes all local data (databases, learned
+            facts, goals, audit log, sessions); your app preferences are
+            kept.
+          </p>
         </div>
       </div>
+
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-3 border border-hairline bg-bg p-6 shadow-lg">
+            <div className="flex items-center gap-2 text-danger">
+              <AlertTriangle className="h-5 w-5" strokeWidth={1.8} />
+              <h3 className="text-sm font-semibold">Delete all my data</h3>
+            </div>
+            <p className="mt-3 text-xs text-ink-2">
+              This permanently deletes every local database, learned fact,
+              goal, task, the audit log, and connector sessions. It cannot
+              be undone. Your app preferences (name, model choice) are kept.
+              Export first if you want a copy.
+            </p>
+            <p className="mt-3 text-xs text-muted">
+              Type <span className="font-mono text-ink">DELETE</span> to
+              confirm.
+            </p>
+            <input
+              type="text"
+              value={deleteConfirm}
+              onChange={(e) => setDeleteConfirm(e.target.value)}
+              autoFocus
+              className="mt-2 w-full rounded-2 border border-hairline bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-danger"
+              placeholder="DELETE"
+            />
+            {deleteError && (
+              <p className="mt-2 text-[11px] text-danger">{deleteError}</p>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setShowDeleteModal(false)}
+                disabled={deleting}
+                className="rounded-2 border border-hairline px-4 py-2 text-xs text-ink transition-colors hover:bg-surface disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={deleteConfirm !== "DELETE" || deleting}
+                className="rounded-2 bg-danger px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-danger/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {deleting ? "Deleting…" : "Delete everything"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </Section>
   );
 }
