@@ -6766,13 +6766,17 @@ def _send_proactive_notification(
         return
 
     opt_out = get_opt_out_text(category)
-    full_msg = f"{message}\n\n---\n{opt_out}"
 
     logger.info(
         "Proactive notify [%s]: delivering (%d chars)",
-        source_id, len(full_msg),
+        source_id, len(message),
     )
-    delivery = deliver_notification(full_msg, category, whatsapp_phone=phone)
+    # Raw message: deliver_notification -> WhatsAppNotifier.send()
+    # appends the opt-out text itself. Pre-appending it here (as the
+    # old direct-listener call required) would double it up on
+    # WhatsApp and put WhatsApp-specific opt-out text in the native
+    # macOS banner.
+    delivery = deliver_notification(message, category, whatsapp_phone=phone)
 
     logger.info(
         "Proactive notify [%s]: status=%s error=%s",

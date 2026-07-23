@@ -48,6 +48,10 @@ class TestMaybeNotifyAction:
         with (
             patch("src.core.cli._read_whatsapp_phone", return_value=None),
             patch(
+                "src.models.llm_provider.create_provider_from_settings",
+                side_effect=RuntimeError("no provider in tests"),
+            ),
+            patch(
                 "src.notifications.notifier.deliver_notification",
                 return_value=DeliveryResult(status="sent"),
             ) as mock_deliver,
@@ -66,6 +70,10 @@ class TestMaybeNotifyAction:
         with (
             patch("src.core.cli._read_whatsapp_phone", return_value="+15551234"),
             patch(
+                "src.models.llm_provider.create_provider_from_settings",
+                side_effect=RuntimeError("no provider in tests"),
+            ),
+            patch(
                 "src.notifications.notifier.deliver_notification",
                 return_value=DeliveryResult(status="sent"),
             ) as mock_deliver,
@@ -82,6 +90,10 @@ class TestMaybeNotifyAction:
         """A successful delivery is recorded in the notification log."""
         with (
             patch("src.core.cli._read_whatsapp_phone", return_value=None),
+            patch(
+                "src.models.llm_provider.create_provider_from_settings",
+                side_effect=RuntimeError("no provider in tests"),
+            ),
             patch(
                 "src.notifications.notifier.deliver_notification",
                 return_value=DeliveryResult(status="sent"),
@@ -189,6 +201,31 @@ class TestSendProactiveNotification:
         log = prefs.get_notification_log()
         assert len(log) == 1
         assert log[0].delivery_status == "sent"
+
+    def test_delivers_raw_message_without_pre_appended_opt_out(
+        self, tmp_db, prefs,
+    ) -> None:
+        """Regression: WhatsAppNotifier.send() appends opt-out text itself.
+
+        Pre-appending it before calling deliver_notification would double
+        it up on WhatsApp and leak WhatsApp-specific opt-out text into the
+        native macOS banner.
+        """
+        with patch(
+            "src.notifications.notifier.deliver_notification",
+            return_value=DeliveryResult(status="sent"),
+        ) as mock_deliver:
+            cli_mod._send_proactive_notification(
+                prefs, "+15551234",
+                category="realtime_action",
+                source_id="msg-optout",
+                message="You have a new urgent reply",
+            )
+
+        delivered_message = mock_deliver.call_args.args[0]
+        assert delivered_message == "You have a new urgent reply"
+        assert "STOP" not in delivered_message
+        assert "---" not in delivered_message
 
     def test_forwards_phone_when_configured(self, tmp_db, prefs) -> None:
         with patch(
