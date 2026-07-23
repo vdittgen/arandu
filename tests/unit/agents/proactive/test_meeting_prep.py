@@ -104,13 +104,24 @@ class TestWithinWindow:
         assert _within_window("2026-07-23 14:00:00", _NOW, 24.0)
 
     def test_utc_z_suffix_is_converted_to_local(self) -> None:
-        """The mart stores UTC ``…Z`` starts; a UTC start equal to
-        local-now + 2h must land in the window regardless of the
-        machine's timezone (would fail if tzinfo were merely stripped)."""
+        """The mart stores UTC ``…Z`` starts; the window check must
+        convert them to local, not merely strip tzinfo.
+
+        The pair of assertions catches a strip-only regression on any
+        non-UTC machine: a start 2h in the local future must be in
+        window (fails strip-only at UTC+), and a start 1h in the local
+        past must be out (fails strip-only at UTC−)."""
         local_now = datetime(2026, 7, 23, 12, 0)  # naive local
-        utc_start = (local_now + timedelta(hours=2)).astimezone(timezone.utc)
-        z = utc_start.isoformat().replace("+00:00", "Z")
-        assert _within_window(z, local_now, 24.0)
+
+        future = (local_now + timedelta(hours=2)).astimezone(timezone.utc)
+        assert _within_window(
+            future.isoformat().replace("+00:00", "Z"), local_now, 24.0,
+        )
+
+        past = (local_now - timedelta(hours=1)).astimezone(timezone.utc)
+        assert not _within_window(
+            past.isoformat().replace("+00:00", "Z"), local_now, 24.0,
+        )
 
 
 # ================================================================
