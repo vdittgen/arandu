@@ -187,7 +187,7 @@ async def _run_pa_with_reflection_async(
     sensitivity_tier: 2 (carries the user's prompt)
     """
     from pydantic_ai.messages import ModelRequest, UserPromptPart
-    from pydantic_graph.nodes import End
+    from pydantic_graph import End
 
     from src.agents.core.cancel_registry import should_stop
     from src.agents.core.task_budget import TaskBudget
