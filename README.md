@@ -94,7 +94,7 @@ When AI agents act on your behalf, the Brain Firewall (written in Rust) ensures 
 
 ### Extension System
 
-8 pre-verified connectors ship with the app, from Apple Calendar to Spotify — no tokens, no config. Toggle them on with one tap. A curated Discover list adds one-click installs for popular services (Slack, Notion, Linear, GitLab, and more) that need your own API token. For anything else, paste any MCP server command and the system auto-discovers its capabilities, maps fields, assigns sensitivity tiers, and starts syncing — no YAML, no config files. Third-party agents run sandboxed: they access data through the Firewall, write to their own namespaced tables, and call only the local LLM.
+8 pre-verified connectors ship with the app, from Apple Calendar to Spotify — no MCP server to configure, just the OS permission or account login each one needs. A curated Discover list adds one-click installs for popular services (Slack, Notion, Linear, GitLab, and more) that need your own API token. For anything else, paste any MCP server command and the system auto-discovers its capabilities, maps fields, assigns sensitivity tiers, and starts syncing — no YAML, no config files. Third-party agents run sandboxed: they access data through the Firewall, write to their own namespaced tables, and call only the local LLM.
 
 ## Architecture
 
