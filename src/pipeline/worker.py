@@ -293,11 +293,12 @@ def _maybe_notify_pipeline(
     db: Any,
     result: Any,
 ) -> None:
-    """Evaluate and optionally send a WhatsApp notification for pipeline results.
+    """Evaluate and optionally notify about pipeline results.
 
-    Non-fatal: notification errors are logged but never fail the
-    pipeline run.  Quick-bails if globally muted or WhatsApp not
-    configured.
+    Delivers over every configured channel — native macOS
+    notifications by default, WhatsApp additionally when a phone
+    number is configured. Non-fatal: notification errors are logged
+    but never fail the pipeline run. Quick-bails if globally muted.
 
     sensitivity_tier: 2
     """
@@ -309,14 +310,13 @@ def _maybe_notify_pipeline(
         if prefs.is_muted_globally():
             return
 
-        # Read WhatsApp phone from settings.json
+        # WhatsApp phone from settings.json — optional; native
+        # delivery doesn't need it.
         phone = _read_whatsapp_phone()
-        if not phone:
-            return
 
         from src.models.llm_provider import create_provider_from_settings
         from src.notifications.models import DeliveryResult, NotificationRecord
-        from src.notifications.notifier import get_opt_out_text
+        from src.notifications.notifier import deliver_notification, get_opt_out_text
         from src.notifications.orchestrator import BrainNotificationOrchestrator
 
         try:
@@ -343,8 +343,9 @@ def _maybe_notify_pipeline(
 
         delivery: DeliveryResult
         if decision.should_notify:
-            notifier = _build_notifier(phone)
-            delivery = notifier.send(decision.message, decision.category)
+            delivery = deliver_notification(
+                decision.message, decision.category, whatsapp_phone=phone,
+            )
         else:
             delivery = DeliveryResult(
                 status="skipped",
@@ -389,24 +390,6 @@ def _read_whatsapp_phone() -> str | None:
     except Exception:  # noqa: BLE001
         pass
     return None
-
-
-def _build_notifier(phone: str) -> Any:
-    """Create a WhatsAppNotifier with catalog-resolved MCP command.
-
-    sensitivity_tier: 1
-    """
-    from src.extensions.connectors.catalog import ConnectorCatalog
-    from src.notifications.notifier import WhatsAppNotifier
-
-    catalog = ConnectorCatalog()
-    wa = catalog.get("whatsapp")
-    return WhatsAppNotifier(
-        whatsapp_phone=phone,
-        mcp_command=wa.command if wa else "npx",
-        mcp_args=wa.args if wa else ("-y", "whatsapp-mcp-lifeosai"),
-        prefer_listener_ipc=True,
-    )
 
 
 def _utc_now() -> str:

@@ -2374,10 +2374,12 @@ def _maybe_notify_action(
     result_dict: dict[str, Any],
     proposal: dict[str, Any],
 ) -> None:
-    """Evaluate and send a WhatsApp notification for action results.
+    """Evaluate and notify about an action result.
 
-    Non-fatal: callers wrap this in try/except so notification
-    failures never degrade the action response.
+    Delivers over every configured channel — native macOS
+    notifications by default, WhatsApp additionally when a phone
+    number is configured. Non-fatal: callers wrap this in try/except
+    so notification failures never degrade the action response.
 
     sensitivity_tier: 2
     """
@@ -2388,16 +2390,16 @@ def _maybe_notify_action(
     if prefs.is_muted_globally():
         return
 
+    # WhatsApp phone from settings.json — optional; native delivery
+    # doesn't need it.
     phone = _read_whatsapp_phone()
-    if not phone:
-        return
 
     from src.models.llm_provider import create_provider_from_settings
     from src.notifications.models import (
         DeliveryResult,
         NotificationRecord,
     )
-    from src.notifications.notifier import get_opt_out_text
+    from src.notifications.notifier import deliver_notification, get_opt_out_text
     from src.notifications.orchestrator import (
         BrainNotificationOrchestrator,
     )
@@ -2420,9 +2422,8 @@ def _maybe_notify_action(
 
     delivery: DeliveryResult
     if decision.should_notify:
-        notifier = _build_whatsapp_notifier(phone)
-        delivery = notifier.send(
-            decision.message, decision.category,
+        delivery = deliver_notification(
+            decision.message, decision.category, whatsapp_phone=phone,
         )
     else:
         delivery = DeliveryResult(
@@ -2453,10 +2454,13 @@ def _maybe_notify_insights(
     db: Any,
     insights: list[dict[str, Any]],
 ) -> None:
-    """Evaluate and send a WhatsApp notification for new insights.
+    """Evaluate and notify about newly generated insights.
 
-    Non-fatal: callers wrap this in try/except so notification
-    failures never degrade the insight generation response.
+    Delivers over every configured channel — native macOS
+    notifications by default, WhatsApp additionally when a phone
+    number is configured. Non-fatal: callers wrap this in try/except
+    so notification failures never degrade the insight generation
+    response.
 
     sensitivity_tier: 2
     """
@@ -2470,16 +2474,16 @@ def _maybe_notify_insights(
     if prefs.is_muted_globally():
         return
 
+    # WhatsApp phone from settings.json — optional; native delivery
+    # doesn't need it.
     phone = _read_whatsapp_phone()
-    if not phone:
-        return
 
     from src.models.llm_provider import create_provider_from_settings
     from src.notifications.models import (
         DeliveryResult,
         NotificationRecord,
     )
-    from src.notifications.notifier import get_opt_out_text
+    from src.notifications.notifier import deliver_notification, get_opt_out_text
     from src.notifications.orchestrator import (
         BrainNotificationOrchestrator,
     )
@@ -2499,9 +2503,8 @@ def _maybe_notify_insights(
 
     delivery: DeliveryResult
     if decision.should_notify:
-        notifier = _build_whatsapp_notifier(phone)
-        delivery = notifier.send(
-            decision.message, decision.category,
+        delivery = deliver_notification(
+            decision.message, decision.category, whatsapp_phone=phone,
         )
     else:
         delivery = DeliveryResult(
@@ -2548,28 +2551,6 @@ def _read_whatsapp_phone() -> str | None:
     except Exception:  # noqa: BLE001
         pass
     return None
-
-
-def _build_whatsapp_notifier(phone: str) -> Any:
-    """Create a WhatsAppNotifier from the catalog.
-
-    sensitivity_tier: 1
-    """
-    from src.extensions.connectors.catalog import ConnectorCatalog
-    from src.notifications.notifier import WhatsAppNotifier
-
-    catalog = ConnectorCatalog()
-    wa = catalog.get("whatsapp")
-    return WhatsAppNotifier(
-        whatsapp_phone=phone,
-        mcp_command=wa.command if wa else "npx",
-        mcp_args=(
-            wa.args
-            if wa
-            else ("-y", "whatsapp-mcp-lifeosai")
-        ),
-        prefer_listener_ipc=True,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -6638,11 +6619,12 @@ def cmd_process_whatsapp_replies(layer: DataLayer) -> int:
 
 
 class _ProactiveSenderNotifier:
-    """Stream per-sender WhatsApp notifications as LLM results arrive.
+    """Stream per-sender notifications as LLM results arrive.
 
     Instead of waiting for all senders to complete and building one
     unified digest, each sender's evaluation fires an immediate
-    notification with their actionable items.
+    notification (native macOS by default, WhatsApp additionally when
+    configured) with their actionable items.
 
     sensitivity_tier: 2
     """
@@ -6650,16 +6632,15 @@ class _ProactiveSenderNotifier:
     _IMPORTANCE_THRESHOLD = 6
 
     def __init__(self, db: Any) -> None:
+        # WhatsApp phone from settings.json — optional; native
+        # delivery doesn't need it.
         self._phone = _read_whatsapp_phone()
-        self._prefs: Any | None = None
         self._db = db
         self._sent_count = 0
 
-        if self._phone:
-            from src.notifications.preference_service import (
-                PreferenceService,
-            )
-            self._prefs = PreferenceService(db_engine=db)
+        from src.notifications.preference_service import PreferenceService
+
+        self._prefs: Any = PreferenceService(db_engine=db)
 
     def on_sender_result(
         self,
@@ -6669,13 +6650,11 @@ class _ProactiveSenderNotifier:
     ) -> None:
         """Callback fired per sender after LLM evaluation.
 
-        Sends a WhatsApp notification immediately if any result
-        has importance >= threshold.
+        Sends a notification immediately if any result has importance
+        >= threshold.
 
         sensitivity_tier: 2
         """
-        if not self._phone or not self._prefs:
-            return
         if self._prefs.is_muted_globally():
             return
 
@@ -6752,21 +6731,23 @@ def _format_sender_notification(
 
 def _send_proactive_notification(
     prefs: Any,
-    phone: str,
+    phone: str | None,
     *,
     category: str,
     source_id: str,
     message: str,
 ) -> None:
-    """Send a proactive notification via the WhatsApp listener IPC.
+    """Send a proactive notification over every configured channel.
 
-    Uses the running listener directly — no extra MCP server spawn.
-    Dedup is per source_id per 2h window (allows multiple senders).
+    Native macOS notifications are the default channel; WhatsApp
+    (via the running listener IPC — no extra MCP server spawn) is
+    additional when ``phone`` is configured. Dedup is per source_id
+    per 2h window (allows multiple senders).
 
     sensitivity_tier: 2
     """
     from src.notifications.models import NotificationRecord
-    from src.notifications.notifier import get_opt_out_text
+    from src.notifications.notifier import deliver_notification, get_opt_out_text
 
     if not prefs.is_category_enabled(category):
         return
@@ -6784,37 +6765,28 @@ def _send_proactive_notification(
         )
         return
 
-    from src.extensions.bridges.whatsapp.listener import (
-        send_text_via_running_listener,
-    )
-
     opt_out = get_opt_out_text(category)
-    full_msg = f"{message}\n\n---\n{opt_out}"
 
     logger.info(
-        "Proactive notify [%s]: sending via listener (%d chars)",
-        source_id, len(full_msg),
+        "Proactive notify [%s]: delivering (%d chars)",
+        source_id, len(message),
     )
-    response = send_text_via_running_listener(
-        to=phone, message=full_msg, timeout_seconds=20.0,
-    )
+    # Raw message: deliver_notification -> WhatsAppNotifier.send()
+    # appends the opt-out text itself. Pre-appending it here (as the
+    # old direct-listener call required) would double it up on
+    # WhatsApp and put WhatsApp-specific opt-out text in the native
+    # macOS banner.
+    delivery = deliver_notification(message, category, whatsapp_phone=phone)
 
-    if response is None:
-        logger.info(
-            "Proactive notify [%s]: listener not running",
-            source_id,
-        )
-        return
-
-    status = str(response.get("status") or "").lower()
-    error = response.get("error")
     logger.info(
         "Proactive notify [%s]: status=%s error=%s",
-        source_id, status, error,
+        source_id, delivery.status, delivery.error,
     )
 
-    delivery_status = "sent" if status == "sent" else "failed"
-    message_id = response.get("message_id") if delivery_status == "sent" else None
+    if delivery.status not in ("sent", "failed"):
+        # not_configured — no channel available to have attempted.
+        return
+
     prefs.log_notification(
         NotificationRecord(
             id=prefs.new_record_id(),
@@ -6822,14 +6794,14 @@ def _send_proactive_notification(
             category=category,
             importance_score=8,
             decision="send",
-            delivery_status=delivery_status,
+            delivery_status=delivery.status,
             message=message,
             opt_out_text=opt_out,
             source_type="proactive",
             source_id=source_id,
-            error=str(error) if error else None,
+            error=delivery.error,
             created_at=utc_now_iso(),
-            message_id=message_id,
+            message_id=delivery.message_id,
         ),
     )
 
@@ -6847,9 +6819,9 @@ def _maybe_notify_events_and_contexts(
 
     sensitivity_tier: 2
     """
+    # WhatsApp phone from settings.json — optional; native delivery
+    # doesn't need it.
     phone = _read_whatsapp_phone()
-    if not phone:
-        return
 
     from src.notifications.preference_service import PreferenceService
 
@@ -7554,12 +7526,9 @@ def _maybe_evaluate_new_messages(
             exc_info=True,
         )
 
+    # WhatsApp phone from settings.json — optional; native delivery
+    # doesn't need it.
     phone = _read_whatsapp_phone()
-    if not phone:
-        logger.info(
-            "Message eval: no WhatsApp phone configured",
-        )
-        return
 
     from src.notifications.preference_service import PreferenceService
 
@@ -7847,42 +7816,43 @@ def cmd_evaluate_messages(
             )
             all_notifications.extend(results)
 
-        # Send notifications if WhatsApp is configured
+        # Notify over every configured channel (native macOS by
+        # default; WhatsApp additionally when a phone is configured).
         if all_notifications:
+            # Optional; native delivery doesn't need it.
             phone = _read_whatsapp_phone()
-            if phone:
-                from src.notifications.preference_service import (
-                    PreferenceService,
+            from src.notifications.preference_service import (
+                PreferenceService,
+            )
+
+            prefs = PreferenceService(db_engine=layer.duckdb)
+            actions = [
+                n for n in all_notifications
+                if n.notification_type == "action"
+            ]
+            awareness = [
+                n for n in all_notifications
+                if n.notification_type == "awareness"
+            ]
+
+            if actions:
+                _send_proactive_notification(
+                    prefs, phone,
+                    category="realtime_action",
+                    source_id=actions[0].id,
+                    message=format_realtime_notification(
+                        actions,
+                    ),
                 )
-
-                prefs = PreferenceService(db_engine=layer.duckdb)
-                actions = [
-                    n for n in all_notifications
-                    if n.notification_type == "action"
-                ]
-                awareness = [
-                    n for n in all_notifications
-                    if n.notification_type == "awareness"
-                ]
-
-                if actions:
-                    _send_proactive_notification(
-                        prefs, phone,
-                        category="realtime_action",
-                        source_id=actions[0].id,
-                        message=format_realtime_notification(
-                            actions,
-                        ),
-                    )
-                if awareness:
-                    _send_proactive_notification(
-                        prefs, phone,
-                        category="realtime_awareness",
-                        source_id=awareness[0].id,
-                        message=format_realtime_notification(
-                            awareness,
-                        ),
-                    )
+            if awareness:
+                _send_proactive_notification(
+                    prefs, phone,
+                    category="realtime_awareness",
+                    source_id=awareness[0].id,
+                    message=format_realtime_notification(
+                        awareness,
+                    ),
+                )
 
         print(_json_output({
             "connector_id": connector_id,
