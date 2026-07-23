@@ -22,7 +22,7 @@ import pytest
 # The runner imports these names lazily; we have to import the same
 # concrete classes the runner uses so isinstance checks work.
 from pydantic_ai.messages import ModelRequest, UserPromptPart  # noqa: E402
-from pydantic_graph.nodes import End  # noqa: E402
+from pydantic_graph import End  # noqa: E402
 from src.agents.core.agent_base import _run_pa_with_reflection_async
 from src.agents.core.output_types import ReflectionVerdict
 from src.agents.core.task_budget import TaskBudget, TaskClass

@@ -93,7 +93,7 @@ def _stub_pa_agent(answer: str = "Hi there.") -> MagicMock:
     """
     from contextlib import asynccontextmanager
 
-    from pydantic_graph.nodes import End
+    from pydantic_graph import End
 
     fake_agent = MagicMock()
     response = ChatResponse(
