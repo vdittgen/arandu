@@ -94,14 +94,14 @@ When AI agents act on your behalf, the Brain Firewall (written in Rust) ensures 
 
 ### Extension System
 
-15 pre-verified connectors ship with the app, from Apple Calendar to Spotify. Toggle them on with one tap. For anything else, paste any MCP server command and the system auto-discovers its capabilities, maps fields, assigns sensitivity tiers, and starts syncing — no YAML, no config files. Third-party agents run sandboxed: they access data through the Firewall, write to their own namespaced tables, and call only the local LLM.
+8 pre-verified connectors ship with the app, from Apple Calendar to Spotify — no MCP server to configure, just the OS permission or account login each one needs. A curated Discover list adds one-click installs for popular services (Slack, Notion, Linear, GitLab, and more) that need your own API token. For anything else, paste any MCP server command and the system auto-discovers its capabilities, maps fields, assigns sensitivity tiers, and starts syncing — no YAML, no config files. Third-party agents run sandboxed: they access data through the Firewall, write to their own namespaced tables, and call only the local LLM.
 
 ## Architecture
 
 ```mermaid
 graph TB
     subgraph "Brain Interface"
-        UI["Dashboard . Chat . Explorer<br/>Data Sources . Agents . Settings"]
+        UI["Dashboard . Chat . Explorer<br/>Connectors . Agents . Settings"]
     end
 
     subgraph "Brain Firewall"
@@ -155,14 +155,14 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system design.
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | App Shell | Tauri 2 | Native desktop app (Rust + webview) |
-| Frontend | React 18 + Tailwind | Dashboard, chat, data explorer, data sources |
+| Frontend | React 18 + Tailwind | Dashboard, chat, data explorer, connectors |
 | Security | Rust | Brain Firewall, consent, audit trail, scope enforcement |
 | Structured DB | SQLite | Embedded SQL — raw tables, pipeline, query tracking (WAL mode) |
 | Knowledge Graph | Kuzu | Entity relationships and multi-hop traversals |
 | Vector Search | ChromaDB | Semantic similarity with Ollama embeddings |
 | Data Pipeline | Manifest-driven Python | ELT with staging, intermediate, marts + smart refresh |
 | Local LLM | Ollama | On-device inference (llama3.1:70b) — zero cloud calls |
-| Connectors | MCP Protocol | Universal data source protocol (15 pre-verified + any custom) |
+| Connectors | MCP Protocol | Universal data source protocol (8 pre-verified + curated Discover presets + any custom) |
 
 ## Contributing
 
