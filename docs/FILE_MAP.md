@@ -172,7 +172,6 @@ After the `refactor/ddd-review-cleanup` reorganization (May 2026):
 | `pages/Agents.tsx` | Agent management |
 | `pages/ExtensionsPage.tsx` | Unified extensions management (~1400 LOC, 4 tabs) |
 | `pages/SettingsPage.tsx` | Settings |
-| `pages/DataSourcesPage.tsx` | Legacy — redirects to `/extensions` |
 | `components/Layout.tsx` | Sidebar + content, exports `PipelineRefreshContext` |
 | `components/PipelineRefreshModal.tsx` | Multi-step pipeline refresh modal |
 | `components/Sidebar.tsx` | Navigation sidebar + `BackgroundTaskIndicator` |

@@ -1,19 +1,24 @@
-"""Tests for WhatsAppNotifier.
+"""Tests for MacNotifier, WhatsAppNotifier, and deliver_notification.
 
-All sends route through the persistent listener IPC
+WhatsApp sends route through the persistent listener IPC
 (``send_text_via_running_listener``).  No MCP client involvement.
+Mac sends shell out to ``osascript``.
 
 sensitivity_tier: N/A — test infrastructure
 """
 
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import patch
 
+from src.notifications.models import DeliveryResult
 from src.notifications.notifier import (
     DEFAULT_OPT_OUT,
     OPT_OUT_TEMPLATES,
+    MacNotifier,
     WhatsAppNotifier,
+    deliver_notification,
     get_opt_out_text,
 )
 
@@ -263,3 +268,231 @@ class TestDelivery:
             result = notifier.send("test", "action_results")
 
         assert result.timestamp is not None
+
+
+# ================================================================
+# MacNotifier
+# ================================================================
+
+
+class TestMacNotifier:
+    """Native macOS notification tests (osascript, mocked)."""
+
+    def test_is_configured_on_macos(self) -> None:
+        """Configured when platform.system() reports Darwin."""
+        notifier = MacNotifier()
+        with patch("platform.system", return_value="Darwin"):
+            assert notifier.is_configured() is True
+
+    def test_is_not_configured_off_macos(self) -> None:
+        """Not configured on any non-Darwin platform."""
+        notifier = MacNotifier()
+        for other in ("Linux", "Windows"):
+            with patch("platform.system", return_value=other):
+                assert notifier.is_configured() is False
+
+    def test_send_not_configured_returns_status(self) -> None:
+        """Send on a non-macOS platform returns not_configured, no subprocess call."""
+        notifier = MacNotifier()
+        with (
+            patch("platform.system", return_value="Linux"),
+            patch("subprocess.run") as mock_run,
+        ):
+            result = notifier.send("test", "action_results")
+
+        assert result.status == "not_configured"
+        mock_run.assert_not_called()
+
+    def test_send_success(self) -> None:
+        """A clean osascript exit returns 'sent'."""
+        notifier = MacNotifier()
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("subprocess.run") as mock_run,
+        ):
+            result = notifier.send("Hello there", "action_results")
+
+        assert result.status == "sent"
+        assert mock_run.call_count == 1
+        args = mock_run.call_args.args[0]
+        assert args[0] == "osascript"
+        assert "Hello there" in args[2]
+
+    def test_send_quotes_message_safely(self) -> None:
+        """Quotes/backslashes in the message don't break the AppleScript literal."""
+        notifier = MacNotifier()
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("subprocess.run") as mock_run,
+        ):
+            notifier.send('She said "hi" \\ bye', "action_results")
+
+        script = mock_run.call_args.args[0][2]
+        assert script.count('"') % 2 == 0  # every quote is paired
+        # The escaped payload round-trips through AppleScript's own
+        # quoting rules (backslash-escaped backslash, then quote).
+        assert '\\"hi\\"' in script
+        assert "\\\\ bye" in script
+
+    def test_send_failure_returns_failed(self) -> None:
+        """A non-zero osascript exit returns 'failed' with the error."""
+        notifier = MacNotifier()
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, "osascript"),
+            ),
+        ):
+            result = notifier.send("test", "action_results")
+
+        assert result.status == "failed"
+        assert result.error is not None
+
+    def test_send_timeout_returns_failed(self) -> None:
+        """A hung osascript call (timeout) returns 'failed', not an exception."""
+        notifier = MacNotifier()
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.TimeoutExpired("osascript", 5.0),
+            ),
+        ):
+            result = notifier.send("test", "action_results")
+
+        assert result.status == "failed"
+
+    def test_send_has_timestamp(self) -> None:
+        """All delivery results include a timestamp."""
+        notifier = MacNotifier()
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("subprocess.run"),
+        ):
+            result = notifier.send("test", "action_results")
+
+        assert result.timestamp is not None
+
+
+# ================================================================
+# deliver_notification (composite channel routing)
+# ================================================================
+
+
+class _FakeNotifier:
+    """Minimal notifier double for composite-routing tests."""
+
+    def __init__(self, *, configured: bool, result: DeliveryResult) -> None:
+        self._configured = configured
+        self._result = result
+        self.send_calls: list[tuple[str, str]] = []
+
+    def is_configured(self) -> bool:
+        return self._configured
+
+    def send(self, message: str, category: str) -> DeliveryResult:
+        self.send_calls.append((message, category))
+        return self._result
+
+
+class TestDeliverNotification:
+    """Composite routing across the native + WhatsApp channels."""
+
+    def test_not_configured_when_neither_channel_available(self) -> None:
+        """Neither macOS nor WhatsApp configured -> not_configured, nothing sent."""
+        mac = _FakeNotifier(configured=False, result=DeliveryResult(status="sent"))
+        wa = _FakeNotifier(configured=False, result=DeliveryResult(status="sent"))
+
+        result = deliver_notification(
+            "hi", "action_results",
+            whatsapp_phone=None,
+            mac_notifier=mac,
+            whatsapp_notifier=wa,
+        )
+
+        assert result.status == "not_configured"
+        assert mac.send_calls == []
+        assert wa.send_calls == []
+
+    def test_native_only_delivers_with_whatsapp_unconfigured(self) -> None:
+        """The acceptance criterion: native alone is enough to notify."""
+        mac = _FakeNotifier(
+            configured=True, result=DeliveryResult(status="sent"),
+        )
+        wa = _FakeNotifier(configured=False, result=DeliveryResult(status="sent"))
+
+        result = deliver_notification(
+            "hi", "action_results",
+            whatsapp_phone=None,
+            mac_notifier=mac,
+            whatsapp_notifier=wa,
+        )
+
+        assert result.status == "sent"
+        assert mac.send_calls == [("hi", "action_results")]
+        assert wa.send_calls == []  # not configured -> never attempted
+
+    def test_both_channels_attempted_when_both_configured(self) -> None:
+        """WhatsApp is additive on top of native, not a replacement."""
+        mac = _FakeNotifier(configured=True, result=DeliveryResult(status="sent"))
+        wa = _FakeNotifier(configured=True, result=DeliveryResult(status="sent"))
+
+        deliver_notification(
+            "hi", "action_results",
+            whatsapp_phone="+1",
+            mac_notifier=mac,
+            whatsapp_notifier=wa,
+        )
+
+        assert mac.send_calls == [("hi", "action_results")]
+        assert wa.send_calls == [("hi", "action_results")]
+
+    def test_returns_sent_if_any_channel_succeeds(self) -> None:
+        """One channel failing must not mask another channel's success."""
+        mac = _FakeNotifier(
+            configured=True,
+            result=DeliveryResult(status="failed", error="osascript missing"),
+        )
+        wa = _FakeNotifier(configured=True, result=DeliveryResult(status="sent"))
+
+        result = deliver_notification(
+            "hi", "action_results",
+            whatsapp_phone="+1",
+            mac_notifier=mac,
+            whatsapp_notifier=wa,
+        )
+
+        assert result.status == "sent"
+
+    def test_returns_failed_when_all_configured_channels_fail(self) -> None:
+        """Both channels configured but both fail -> surfaces a failure."""
+        mac = _FakeNotifier(
+            configured=True,
+            result=DeliveryResult(status="failed", error="osascript missing"),
+        )
+        wa = _FakeNotifier(
+            configured=True,
+            result=DeliveryResult(status="failed", error="listener down"),
+        )
+
+        result = deliver_notification(
+            "hi", "action_results",
+            whatsapp_phone="+1",
+            mac_notifier=mac,
+            whatsapp_notifier=wa,
+        )
+
+        assert result.status == "failed"
+
+    def test_default_notifiers_constructed_when_not_injected(self) -> None:
+        """Without injected fakes, real MacNotifier/WhatsAppNotifier are built."""
+        with (
+            patch("platform.system", return_value="Linux"),
+        ):
+            result = deliver_notification(
+                "hi", "action_results", whatsapp_phone=None,
+            )
+
+        # Off-macOS, no phone: both real channels are unconfigured.
+        assert result.status == "not_configured"

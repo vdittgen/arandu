@@ -1,9 +1,12 @@
-"""WhatsApp notification delivery via persistent listener IPC.
+"""Notification delivery — native macOS + WhatsApp via listener IPC.
 
-Routes all WhatsApp sends through the running listener subprocess,
-which owns the sole Baileys connection.  The listener writes outbox
-files and polls for responses — see
-:func:`send_text_via_running_listener`.
+Native macOS notifications (:class:`MacNotifier`) are the default
+channel: no account setup, works the moment the app is installed.
+WhatsApp (:class:`WhatsAppNotifier`) routes all sends through the
+running listener subprocess, which owns the sole Baileys connection —
+see :func:`send_text_via_running_listener`. :func:`deliver_notification`
+composites both, so callers get native delivery even when WhatsApp
+isn't configured.
 
 sensitivity_tier: 2 (sends messages containing personal data summaries)
 """
@@ -11,6 +14,8 @@ sensitivity_tier: 2 (sends messages containing personal data summaries)
 from __future__ import annotations
 
 import logging
+import platform
+import subprocess
 from datetime import datetime, timezone
 
 from src.notifications.models import DeliveryResult
@@ -44,6 +49,67 @@ def get_opt_out_text(category: str) -> str:
     sensitivity_tier: 1
     """
     return OPT_OUT_TEMPLATES.get(category, DEFAULT_OPT_OUT)
+
+
+def _osascript_quote(text: str) -> str:
+    """Quote a string for embedding as an AppleScript literal.
+
+    sensitivity_tier: 1
+    """
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+class MacNotifier:
+    """Send native macOS notifications via ``osascript``.
+
+    The default notification channel: unlike WhatsApp, it needs no
+    account setup and works the moment the app is installed. A no-op
+    (``not_configured``) on non-macOS platforms — other OSes are
+    tracked separately (issue #43 is "macOS native first").
+
+    sensitivity_tier: 2
+    """
+
+    def __init__(self, timeout: float = 5.0) -> None:
+        self._timeout = timeout
+
+    def is_configured(self) -> bool:
+        """True on macOS only.
+
+        sensitivity_tier: 1
+        """
+        return platform.system() == "Darwin"
+
+    def send(self, message: str, category: str) -> DeliveryResult:  # noqa: ARG002
+        """Display a native notification via ``osascript``.
+
+        ``category`` is accepted for interface parity with
+        :class:`WhatsAppNotifier` (native notifications carry no
+        opt-out text — that's a WhatsApp-specific reply convention).
+
+        sensitivity_tier: 2
+        """
+        now_ts = datetime.now(timezone.utc).isoformat()
+        if not self.is_configured():
+            return DeliveryResult(status="not_configured", timestamp=now_ts)
+
+        script = (
+            f"display notification {_osascript_quote(message)} "
+            f'with title "Arandu"'
+        )
+        try:
+            subprocess.run(
+                ["osascript", "-e", script],
+                check=True,
+                capture_output=True,
+                timeout=self._timeout,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            return DeliveryResult(
+                status="failed", error=str(exc), timestamp=now_ts,
+            )
+        return DeliveryResult(status="sent", timestamp=now_ts)
 
 
 class WhatsAppNotifier:
@@ -176,3 +242,51 @@ class WhatsAppNotifier:
             ),
             timestamp=now_ts,
         )
+
+
+def deliver_notification(
+    message: str,
+    category: str,
+    *,
+    whatsapp_phone: str | None,
+    mac_notifier: MacNotifier | None = None,
+    whatsapp_notifier: WhatsAppNotifier | None = None,
+) -> DeliveryResult:
+    """Deliver a notification over every configured channel.
+
+    Native macOS notifications are the default channel and need no
+    setup — they're attempted whenever running on macOS. WhatsApp is
+    an additional, opt-in channel sent when ``whatsapp_phone`` is
+    configured. Both are attempted independently; either one landing
+    is enough to notify the user.
+
+    Returns the first "sent" result if any channel delivered,
+    "not_configured" if no channel is available at all, or a "failed"
+    result (from whichever channel actually ran) otherwise. Callers
+    that log a single ``DeliveryResult`` per notification (the
+    existing schema — see ``NotificationRecord``) get one coherent
+    outcome without a database migration for per-channel tracking.
+
+    sensitivity_tier: 2
+    """
+    mac = mac_notifier if mac_notifier is not None else MacNotifier()
+    wa = (
+        whatsapp_notifier
+        if whatsapp_notifier is not None
+        else WhatsAppNotifier(whatsapp_phone=whatsapp_phone)
+    )
+
+    results = [
+        n.send(message, category)
+        for n in (mac, wa)
+        if n.is_configured()
+    ]
+
+    if not results:
+        return DeliveryResult(
+            status="not_configured",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+
+    sent = next((r for r in results if r.status == "sent"), None)
+    return sent if sent is not None else results[0]
