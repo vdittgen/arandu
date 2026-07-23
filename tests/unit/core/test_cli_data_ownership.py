@@ -130,3 +130,35 @@ class TestDeleteAllData:
         assert not (data / "arandu.sqlite3").exists()
         assert settings.exists()
         assert settings.read_text() == '{"user_name": "Vinicius"}'
+
+    @pytest.mark.parametrize("kind", ["home", "cwd", "root"])
+    def test_refuses_unsafe_paths(self, kind, monkeypatch, capsys) -> None:
+        """An irreversible delete must never target $HOME, CWD, or /.
+
+        A bare ``--data-dir ""`` parses to ``Path(".")`` at the argparse
+        layer, i.e. the "cwd" case (the app install dir), so it's
+        guarded too.
+        """
+        home = Path.home()
+        targets = {
+            "home": str(home),
+            "cwd": ".",
+            "root": "/",
+        }
+        # Guard against the test itself doing damage: rmtree must never
+        # be reached for these inputs.
+        import shutil
+
+        monkeypatch.setattr(
+            shutil,
+            "rmtree",
+            lambda *a, **k: pytest.fail("rmtree must not run on unsafe path"),
+        )
+
+        code = cli_mod.cmd_delete_all_data(targets[kind])
+        assert code == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result["ok"] is False
+        assert "unsafe path" in result["error"]
+        # The guarded locations are all still present.
+        assert home.exists()

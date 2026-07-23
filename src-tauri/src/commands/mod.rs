@@ -3984,18 +3984,70 @@ pub async fn export_user_data(
 
 /// Permanently delete all local user data — the SQLite/Kuzu/Chroma
 /// stores, learned facts, goals & tasks, the audit chain, sessions,
-/// and derived caches. App preferences are preserved so the app stays
-/// launchable and restarts into a fresh, empty state.
+/// and derived caches. App preferences are preserved.
+///
+/// Order matters for a *complete* wipe:
+/// 1. Kill live background writers first (pipeline, sync, insights,
+///    scheduled agents, proactive eval, WhatsApp listener) so none of
+///    them recreates DB/WAL files inside the freshly emptied directory
+///    with data they were holding in memory.
+/// 2. Wipe the data directory (the Python CLI).
+/// 3. Re-run `init` so Kuzu's schema exists again — a bare webview
+///    reload would otherwise leave the app stuck on "DB issue" (Kuzu
+///    DDL only runs from `init`/`reset`, not on first write). The
+///    frontend reloads after this returns.
 ///
 /// # sensitivity_tier: 3
 #[tauri::command]
 pub async fn delete_all_user_data(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    // 1. Stop live writers. Mirrors the startup cleanup in lib.rs; the
+    //    WhatsApp listener is included here (unlike at startup) because
+    //    a full wipe removes its session, so it must not keep the DB
+    //    open or write past the deletion.
+    let writer_patterns = [
+        "src\\.core\\.cli startup-sync",
+        "src\\.core\\.cli sync-all-stale",
+        "src\\.core\\.cli sync-connector",
+        "src\\.core\\.cli generate-insights",
+        "src\\.core\\.cli run-scheduled-agents",
+        "src\\.core\\.cli evaluate-proactive",
+        "src\\.core\\.cli evaluate-messages",
+        "src\\.core\\.cli whatsapp-listener-run",
+        "src\\.pipeline\\.worker run",
+    ];
+    for pattern in writer_patterns {
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-f", pattern])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+
+    // 2. Wipe.
     let output =
         call_python_cli(&["delete-all-data"], &state.project_root).await?;
-    serde_json::from_str(&output)
-        .map_err(|e| format!("Failed to parse delete-all-data JSON: {e}"))
+    let value: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse delete-all-data JSON: {e}"))?;
+    if !value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let err = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("delete failed")
+            .to_string();
+        return Err(err);
+    }
+
+    // 3. Self-heal the (now-empty) DB schema. Best-effort: the wipe
+    //    already succeeded, and the startup hook re-runs `init` on the
+    //    next launch regardless, so a failure here is non-fatal.
+    if let Err(e) = call_python_cli(&["init"], &state.project_root).await {
+        eprintln!("[delete_all_user_data] post-wipe init failed: {e}");
+    }
+
+    Ok(value)
 }
 
 /// Stream a question to a specific agent (Brain or a user-authored agent).

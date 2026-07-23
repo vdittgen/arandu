@@ -351,7 +351,25 @@ def cmd_delete_all_data(data_dir: str | None = None) -> int:
     import shutil
 
     try:
-        base = Path(data_dir) if data_dir else Path.home() / ".arandu" / "data"
+        base = (
+            Path(data_dir) if data_dir else Path.home() / ".arandu" / "data"
+        ).expanduser().resolve()
+
+        # Safety rails — this is an irreversible recursive delete. Refuse
+        # anything that isn't a specific data directory: never the
+        # filesystem root, $HOME, or the process CWD (a bare or empty
+        # ``--data-dir`` resolves to "." → the app install dir).
+        forbidden = {
+            Path(base.anchor),  # "/" (or a drive root on Windows)
+            Path.home().resolve(),
+            Path.cwd().resolve(),
+        }
+        if base in forbidden:
+            return _emit_json({
+                "ok": False,
+                "error": f"refusing to delete unsafe path: {base}",
+            })
+
         existed = base.exists()
         if existed:
             shutil.rmtree(base)
