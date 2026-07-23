@@ -95,6 +95,20 @@ def _json_output(data: Any) -> str:
     return json.dumps(data, cls=_DateTimeEncoder, ensure_ascii=False)
 
 
+def _emit_json(data: Any) -> int:
+    """Print a JSON object to stdout and return exit code 0.
+
+    Convenience for the ``{ok: bool, ...}`` command contract the Rust
+    bridge parses. Returns 0 even for ``{ok: false}`` payloads: the
+    error is carried in the JSON, and a non-zero exit would make the
+    bridge reject the invoke before the frontend can read it.
+
+    sensitivity_tier: N/A
+    """
+    print(_json_output(data), flush=True)
+    return 0
+
+
 def _parse_reply_context_arg(raw: str | None) -> dict[str, Any] | None:
     """Parse the --reply-context CLI arg into a normalized dict.
 
@@ -232,6 +246,143 @@ def cmd_reset(layer: DataLayer) -> int:
         print(f"✗  Reset failed: {exc}", file=sys.stderr)
         logger.exception("reset failed")
         return 1
+
+
+# ---------------------------------------------------------------------------
+# Data ownership — export + delete (Settings › Privacy)
+# ---------------------------------------------------------------------------
+
+
+def _default_export_dir() -> Path:
+    """Where an export archive lands when the caller doesn't specify.
+
+    Prefers ``~/Downloads`` (where a user looks first); falls back to
+    ``~/.arandu/exports`` when it doesn't exist (headless/CI).
+
+    sensitivity_tier: 1
+    """
+    downloads = Path.home() / "Downloads"
+    if downloads.is_dir():
+        return downloads
+    return Path.home() / ".arandu" / "exports"
+
+
+def cmd_export_data(layer: DataLayer, output_dir: str | None = None) -> int:
+    """Export all local user data as an inspectable JSON archive (zip).
+
+    Dumps every SQLite table — raw_* ingested data, derived marts,
+    learned facts, goals/tasks, the notification log, everything — to
+    one JSON file per table, plus a ``manifest.json`` (table → row
+    count), bundled into a single timestamped zip. The Kuzu graph and
+    Chroma vectors are *derived* from these tables, so the SQLite dump
+    is a complete, human-readable record of the user's own data.
+
+    Emits JSON: ``{ok, path, tables, total_rows, bytes}``.
+
+    sensitivity_tier: 3 (exports all personal data)
+    """
+    import zipfile
+
+    try:
+        db = layer.duckdb
+        tables = [
+            str(r["name"])
+            for r in db.query(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
+            )
+        ]
+
+        dest_dir = Path(output_dir) if output_dir else _default_export_dir()
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        dest = dest_dir / f"arandu-export-{ts}.zip"
+
+        manifest: dict[str, Any] = {
+            "app": "arandu",
+            "format_version": 1,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "tables": {},
+        }
+        total_rows = 0
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+            for table in tables:
+                rows = db.query(f'SELECT * FROM "{table}"')  # noqa: S608
+                total_rows += len(rows)
+                manifest["tables"][table] = len(rows)
+                zf.writestr(
+                    f"tables/{table}.json",
+                    _json_output(rows),
+                )
+            zf.writestr("manifest.json", _json_output(manifest))
+
+        return _emit_json({
+            "ok": True,
+            "path": str(dest),
+            "tables": len(tables),
+            "total_rows": total_rows,
+            "bytes": dest.stat().st_size,
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("export-data failed")
+        return _emit_json({"ok": False, "error": str(exc)})
+
+
+def cmd_delete_all_data(data_dir: str | None = None) -> int:
+    """Permanently delete all local user data.
+
+    Removes the entire data directory (``~/.arandu/data`` by default):
+    the SQLite / Kuzu / Chroma stores, learned facts, goals & tasks,
+    the audit chain, the WhatsApp listener session, and every derived
+    cache. App preferences (``~/.arandu/settings.json``) and the Python
+    runtime are preserved, so the app stays launchable and restarts
+    into a fresh, empty state.
+
+    The Pro cloud account and its keychain session are cleared
+    separately by the Pro overlay (out of OSS scope).
+
+    Runs *before* any DataLayer is opened (dispatched ahead of the
+    engine context in ``main``) so no engine holds the directory open
+    while it's wiped. Emits JSON: ``{ok, path, existed}``.
+
+    sensitivity_tier: 3
+    """
+    import shutil
+
+    try:
+        base = (
+            Path(data_dir) if data_dir else Path.home() / ".arandu" / "data"
+        ).expanduser().resolve()
+
+        # Safety rails — this is an irreversible recursive delete. Refuse
+        # anything that isn't a specific data directory: never the
+        # filesystem root, $HOME, or the process CWD (a bare or empty
+        # ``--data-dir`` resolves to "." → the app install dir).
+        forbidden = {
+            Path(base.anchor),  # "/" (or a drive root on Windows)
+            Path.home().resolve(),
+            Path.cwd().resolve(),
+        }
+        if base in forbidden:
+            return _emit_json({
+                "ok": False,
+                "error": f"refusing to delete unsafe path: {base}",
+            })
+
+        existed = base.exists()
+        if existed:
+            shutil.rmtree(base)
+        # Leave an empty data dir so the next launch initializes cleanly.
+        base.mkdir(parents=True, exist_ok=True)
+        return _emit_json({
+            "ok": True,
+            "path": str(base),
+            "existed": existed,
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("delete-all-data failed")
+        return _emit_json({"ok": False, "error": str(exc)})
 
 
 # ---------------------------------------------------------------------------
@@ -8023,6 +8174,21 @@ def build_parser() -> argparse.ArgumentParser:
     # JSON output commands (for Tauri bridge)
     subparsers.add_parser("stats", help="Output database stats as JSON")
 
+    export_parser = subparsers.add_parser(
+        "export-data",
+        help="Export all local user data to a JSON zip archive",
+    )
+    export_parser.add_argument(
+        "--output-dir",
+        default=None,
+        metavar="PATH",
+        help="Directory to write the archive to (default: ~/Downloads)",
+    )
+    subparsers.add_parser(
+        "delete-all-data",
+        help="Permanently delete all local user data (keeps settings)",
+    )
+
     msg_parser = subparsers.add_parser(
         "query-messages",
         help="Query recent messages (JSON)",
@@ -9524,6 +9690,11 @@ def main(argv: list[str] | None = None) -> int:
         kwargs["base_path"] = args.data_dir
 
     # Commands that don't need a DataLayer.
+    if args.command == "delete-all-data":
+        # Runs before any engine opens so nothing holds the data
+        # directory open while it's wiped.
+        data_dir = str(args.data_dir) if args.data_dir is not None else None
+        return cmd_delete_all_data(data_dir)
     if args.command == "transcribe-audio":
         return cmd_transcribe_audio(
             args.audio_input, args.model_size, args.language,
@@ -9759,6 +9930,8 @@ def main(argv: list[str] | None = None) -> int:
         # JSON commands — engines lazy-init as needed.
         if args.command == "stats":
             return cmd_stats(layer)
+        if args.command == "export-data":
+            return cmd_export_data(layer, args.output_dir)
         if args.command == "query-messages":
             return cmd_query_messages(layer, args.limit, args.offset)
         if args.command == "query-events":
