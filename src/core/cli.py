@@ -1252,12 +1252,18 @@ def _emit_stream(
     *,
     layer: DataLayer | None = None,
     session_id: str | None = None,
-) -> None:
+) -> str | None:
     """Forward stream chunks to stdout and optionally persist the result.
 
     The accumulator mirrors the Rust ``StreamCollector`` so what we
-    store matches what the frontend renders. Persistence only happens
-    when ``layer`` and ``session_id`` are both supplied.
+    store matches what the frontend renders. Persistence to the chat
+    store only happens when ``layer`` and ``session_id`` are both
+    supplied; the plain-text reply is accumulated regardless so the
+    caller can act on the finished turn (e.g. post-turn fact learning)
+    even for unsaved asks.
+
+    Returns the assistant's plain-text reply, or ``None`` when the
+    stream errored or produced no text.
 
     sensitivity_tier: 3
     """
@@ -1278,8 +1284,6 @@ def _emit_stream(
 
     for chunk in chunks:
         print(_json_output(chunk), flush=True)
-        if store is None:
-            continue
         ty = chunk.get("type") if isinstance(chunk, dict) else None
         if ty == "context":
             srcs = chunk.get("sources")
@@ -1329,24 +1333,94 @@ def _emit_stream(
         elif ty == "error":
             saw_error = True
 
-    if store is None or saw_error:
-        return
+    if saw_error:
+        return None
 
-    parts = [parts_by_id[pid] for pid in parts_order if pid in parts_by_id]
     text = "".join(text_buf)
-    if not parts and not text:
-        return
 
-    store.append_message(
-        session_id,  # type: ignore[arg-type]
-        "assistant",
-        text,
-        parts=parts or None,
-        sources=sources or None,
-        latency_ms=latency_ms,
-        model=model,
-        thinking="".join(thinking_buf) or None,
-    )
+    if store is not None:
+        parts = [parts_by_id[pid] for pid in parts_order if pid in parts_by_id]
+        if parts or text:
+            store.append_message(
+                session_id,  # type: ignore[arg-type]
+                "assistant",
+                text,
+                parts=parts or None,
+                sources=sources or None,
+                latency_ms=latency_ms,
+                model=model,
+                thinking="".join(thinking_buf) or None,
+            )
+
+    return text or None
+
+
+def _fact_learning_enabled() -> bool:
+    """Whether to extract personal facts from chat turns (default: on).
+
+    Disabled only by an explicit falsy ``learn_facts_from_chat`` in
+    settings.json — a real boolean ``false`` or a hand-edited string
+    like ``"false"``/``"off"``/``"0"`` — so existing installs opt in
+    automatically.
+
+    sensitivity_tier: 1
+    """
+    try:
+        from src.models.llm_provider import load_llm_settings
+
+        val = load_llm_settings().get("learn_facts_from_chat", True)
+        if isinstance(val, str):
+            return val.strip().lower() not in {"false", "0", "no", "off", ""}
+        return bool(val)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _maybe_learn_facts(
+    layer: DataLayer,
+    user_message: str,
+    assistant_text: str | None,
+    *,
+    session_id: str | None,
+) -> None:
+    """Extract personal facts from a finished conversational turn.
+
+    This is the single production writer of ``_learned_facts`` — the
+    table the Brain prompt (``build_learned_facts_context``), the goal
+    miner's fact evidence, and the facts-review UI all read. Without
+    this call the table stays empty and the app never "learns" about
+    the user from conversation.
+
+    Gated on ``session_id``: only genuine user chat turns carry an
+    active chat session. Internal/background asks (dashboard widgets,
+    helpers — ``ask_brain_internal``) run session-less and must *not*
+    train long-term memory with system-generated prompts. Gating here
+    also keeps the synchronous ``cmd_ask`` path from adding an LLM
+    round-trip to those internal calls (which are read via
+    ``wait_with_output`` under a bounded timeout).
+
+    Best-effort: any failure is logged and swallowed so it can never
+    break a chat turn, and it can be turned off via the
+    ``learn_facts_from_chat`` setting.
+
+    sensitivity_tier: 3
+    """
+    if not session_id or not user_message or not assistant_text:
+        return
+    try:
+        if not _fact_learning_enabled():
+            return
+        from src.agents.fact_extractor import FactLearner
+
+        learner = FactLearner(db_engine=layer.duckdb)
+        facts = learner.extract_facts_from_conversation(
+            user_messages=[user_message],
+            assistant_messages=[assistant_text],
+        )
+        if facts:
+            logger.info("Learned %d fact(s) from chat turn", len(facts))
+    except Exception:  # noqa: BLE001
+        logger.debug("Post-turn fact learning failed", exc_info=True)
 
 
 def cmd_ask_stream(
@@ -1422,7 +1496,7 @@ def cmd_ask_stream(
                 tool_registry=tool_registry,
                 provider=provider,
             )
-            _emit_stream(
+            assistant_text = _emit_stream(
                 chat.ask_stream(
                     question,
                     reply_context=reply_context,
@@ -1431,6 +1505,10 @@ def cmd_ask_stream(
                 ),
                 layer=layer,
                 session_id=session_id,
+            )
+            # Learn facts after the reply has fully streamed to the user.
+            _maybe_learn_facts(
+                layer, question, assistant_text, session_id=session_id,
             )
             return 0
 
@@ -1454,7 +1532,7 @@ def cmd_ask_stream(
             tool_registry=tool_registry,
             provider=provider,
         )
-        _emit_stream(
+        assistant_text = _emit_stream(
             v2.ask_stream(
                 question,
                 reply_context=reply_context,
@@ -1462,6 +1540,10 @@ def cmd_ask_stream(
             ),
             layer=layer,
             session_id=session_id,
+        )
+        # Learn facts after the reply has fully streamed to the user.
+        _maybe_learn_facts(
+            layer, question, assistant_text, session_id=session_id,
         )
         return 0
     except Exception as exc:
@@ -1927,6 +2009,12 @@ def cmd_ask(
                 model=resp.model,
             )
         print(_json_output(result))
+        # Learn facts after the answer JSON is emitted. Gated on
+        # session_id: session-less internal asks (ask_brain_internal —
+        # widgets/background) must not train memory, and this path is
+        # read synchronously via wait_with_output, so gating also keeps
+        # the extra LLM pass off those bounded-timeout internal calls.
+        _maybe_learn_facts(layer, question, resp.answer, session_id=session_id)
         return 0
     except Exception as exc:
         print(_json_output({"error": str(exc)}), file=sys.stderr)
