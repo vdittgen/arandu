@@ -3,16 +3,26 @@
  *
  * Three columns (Personal / Life / Work) listing the user's active
  * goals. Selecting a goal opens a detail panel with the why, the
- * topics rolled up under it (placeholder for now), the habits
- * anchored to it, and status controls. Brain-mined goals carry an
- * accent border so they stand out from user-entered ones.
+ * topics rolled up under it, the habits anchored to it, and status
+ * controls. Brain-mined goals carry an accent border so they stand
+ * out from user-entered ones; a brain goal whose evidence has gone
+ * stale (`decay_state`) fades and shows a "Dormant" badge, and once
+ * auto-archived it moves to the collapsible Archived review section
+ * where it can be restored.
  *
  * sensitivity_tier: 3
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Flame, Plus, RefreshCw, Sparkles, Target } from "lucide-react";
+import {
+  Archive,
+  Flame,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  Target,
+} from "lucide-react";
 import Card from "../components/dashboard/Card";
 import { Skeleton } from "../components/LoadingState";
 import {
@@ -93,6 +103,8 @@ interface GoalCardProps {
 
 function GoalCard({ goal, selected, onSelect }: GoalCardProps) {
   const isBrain = goal.source === "brain";
+  // A brain goal the miner stopped re-confirming fades toward archival.
+  const dormant = goal.decay_state !== "fresh";
   return (
     <button
       type="button"
@@ -101,7 +113,9 @@ function GoalCard({ goal, selected, onSelect }: GoalCardProps) {
         selected
           ? "border-indigo bg-indigo/5"
           : "border-hairline bg-surface hover:bg-bg-2"
-      } ${isBrain ? "border-l-4 border-l-indigo" : ""}`}
+      } ${isBrain ? "border-l-4 border-l-indigo" : ""} ${
+        dormant ? "opacity-60" : ""
+      }`}
     >
       <div className="flex items-center justify-between gap-2">
         <span className="truncate text-sm font-medium text-ink">
@@ -116,11 +130,21 @@ function GoalCard({ goal, selected, onSelect }: GoalCardProps) {
       )}
       <div className="mt-2 flex items-center justify-between">
         <ImportanceDots value={goal.importance} />
-        {isBrain && (
-          <span className="flex items-center gap-1 text-[10px] text-indigo">
-            <Sparkles className="h-3 w-3" /> Brain
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {dormant && (
+            <span
+              className="rounded-pill bg-bg-2 px-1.5 py-0.5 text-[10px] text-muted"
+              title={`No fresh evidence for ${goal.days_since_confirmed} days`}
+            >
+              Dormant
+            </span>
+          )}
+          {isBrain && (
+            <span className="flex items-center gap-1 text-[10px] text-indigo">
+              <Sparkles className="h-3 w-3" /> Brain
+            </span>
+          )}
+        </div>
       </div>
     </button>
   );
@@ -534,6 +558,71 @@ function NewGoalModal({
   );
 }
 
+function ArchivedReview({
+  onRestored,
+}: {
+  readonly onRestored: () => void;
+}) {
+  const archived = useGoals({ status: "archived" });
+  const [open, setOpen] = useState(false);
+  const [restoring, setRestoring] = useState<string | null>(null);
+
+  const rows = archived.data ?? [];
+  if (rows.length === 0) return null;
+
+  const onRestore = async (id: string) => {
+    setRestoring(id);
+    try {
+      await updateGoal(id, { status: "active" });
+      archived.refetch();
+      onRestored();
+    } finally {
+      setRestoring(null);
+    }
+  };
+
+  return (
+    <div className="rounded-2 border border-hairline bg-surface/60">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-4 py-2 text-xs text-muted hover:text-ink"
+      >
+        <span className="flex items-center gap-2">
+          <Archive className="h-3.5 w-3.5" />
+          Archived goals ({rows.length})
+        </span>
+        <span className="text-[10px]">{open ? "Hide" : "Review"}</span>
+      </button>
+      {open && (
+        <ul className="space-y-1 border-t border-hairline px-4 py-3">
+          {rows.map((g) => (
+            <li
+              key={g.id}
+              className="flex items-center justify-between gap-2 text-xs"
+            >
+              <span className="min-w-0 truncate text-ink-2">
+                {g.title}
+                <span className="ml-2 text-muted">
+                  dormant {g.days_since_confirmed}d
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => onRestore(g.id)}
+                disabled={restoring === g.id}
+                className="shrink-0 rounded border border-hairline px-2 py-1 text-[11px] text-indigo hover:bg-indigo/5 disabled:opacity-60"
+              >
+                {restoring === g.id ? "Restoring…" : "Restore"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function Goals() {
   const location = useLocation();
   const initialSelected =
@@ -633,6 +722,8 @@ function Goals() {
           />
         ))}
       </div>
+
+      <ArchivedReview onRestored={goals.refetch} />
 
       <NewGoalModal
         open={showNew}

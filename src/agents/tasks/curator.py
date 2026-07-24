@@ -12,10 +12,16 @@ sensitivity_tier: 2
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date as date_cls
 from typing import Any
 
+from src.agents.tasks.decay import (
+    ARCHIVE_AFTER_DAYS,
+    FADE_AFTER_DAYS,
+    goal_decay,
+    should_archive,
+)
 from src.agents.tasks.models import (
     DailyScheduleRecord,
     Goal,
@@ -145,6 +151,47 @@ class TaskCurator:
     def archive_goal(self, goal_id: str) -> None:
         """sensitivity_tier: 2"""
         update_goal_fields(self._db, goal_id, status="archived")
+
+    def decay_goals(
+        self,
+        *,
+        fade_after_days: int = FADE_AFTER_DAYS,
+        archive_after_days: int = ARCHIVE_AFTER_DAYS,
+    ) -> list[Goal]:
+        """Auto-archive brain-mined goals whose evidence has gone stale.
+
+        A goal the miner stops re-confirming keeps an increasingly old
+        ``last_confirmed_at``; once it crosses the archive threshold it
+        is moved to ``status='archived'``. Reversible — the row keeps
+        all its data and is restored by setting ``status`` back to
+        ``active`` (the archived list is the review queue). Only active
+        brain-mined goals are considered; user goals never decay.
+
+        Returns the goals archived this pass.
+
+        sensitivity_tier: 2
+        """
+        archived: list[Goal] = []
+        for goal in list_goals(self._db, status="active"):
+            if goal.source != "brain":
+                continue
+            decay = goal_decay(
+                source=goal.source,
+                last_confirmed_at=goal.last_confirmed_at,
+                created_at=goal.created_at,
+                fade_after_days=fade_after_days,
+                archive_after_days=archive_after_days,
+            )
+            if should_archive(decay):
+                update_goal_fields(self._db, goal.id, status="archived")
+                # Return the post-archive snapshot so the reported goal's
+                # status matches what's now persisted.
+                archived.append(replace(goal, status="archived"))
+        if archived:
+            logger.info(
+                "Goal decay archived %d stale brain goal(s)", len(archived),
+            )
+        return archived
 
     # ------------------------------------------------------------------
     # Project CRUD
@@ -445,6 +492,16 @@ class TaskCurator:
                 )
                 if topic_id:
                     set_topic_linked_goal(self._db, topic_id, goal.id)
+
+        # Decay runs on the mining cadence: goals the miner just
+        # re-confirmed above had their timestamp bumped, so only goals
+        # whose evidence has genuinely dried up cross the threshold.
+        # Non-fatal — a decay failure must not sink a good mining pass.
+        try:
+            self.decay_goals()
+        except Exception:  # noqa: BLE001
+            logger.warning("Goal decay pass failed", exc_info=True)
+
         return created
 
     def propose_from_messages(
