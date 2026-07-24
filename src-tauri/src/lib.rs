@@ -174,6 +174,7 @@ pub fn run() {
             commands::get_pending_replies,
             commands::get_contact_contexts,
             commands::get_actionable_events,
+            commands::get_meeting_prep_briefs,
             commands::dismiss_pending_reply,
             commands::dismiss_actionable_event,
             // User profile inference

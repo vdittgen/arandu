@@ -4801,6 +4801,32 @@ def cmd_get_actionable_events(layer: DataLayer) -> int:
         return 1
 
 
+def cmd_get_meeting_prep_briefs(
+    layer: DataLayer, within_hours: float,
+) -> int:
+    """Return meeting-prep briefs for upcoming meetings as JSON.
+
+    Composed deterministically (no LLM) from cached contact contexts +
+    the enriched-events / contact-topics marts, so it's safe on page
+    load. Each brief carries every known attendee's situation, open
+    loops, and last message.
+
+    sensitivity_tier: 3
+    """
+    try:
+        from dataclasses import asdict
+
+        from src.agents.proactive import ProactiveIntelligence
+
+        pi = ProactiveIntelligence(db_engine=layer.duckdb)
+        briefs = pi.get_meeting_prep_briefs(within_hours=within_hours)
+        print(_json_output([asdict(b) for b in briefs]))
+        return 0
+    except Exception as exc:
+        print(_json_output({"error": str(exc)}), file=sys.stderr)
+        return 1
+
+
 def cmd_dismiss_pending_reply(
     layer: DataLayer, reply_id: str,
 ) -> int:
@@ -9151,6 +9177,13 @@ def build_parser() -> argparse.ArgumentParser:
         "get-actionable-events",
         help="Get actionable events (JSON)",
     )
+    p_meeting_prep = subparsers.add_parser(
+        "get-meeting-prep-briefs",
+        help="Get prep briefs for upcoming meetings (JSON)",
+    )
+    p_meeting_prep.add_argument(
+        "--within-hours", type=float, default=24.0,
+    )
     p_dismiss_reply = subparsers.add_parser(
         "dismiss-pending-reply",
         help="Dismiss a pending reply",
@@ -10240,6 +10273,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_get_contact_contexts(layer)
         if args.command == "get-actionable-events":
             return cmd_get_actionable_events(layer)
+        if args.command == "get-meeting-prep-briefs":
+            return cmd_get_meeting_prep_briefs(layer, args.within_hours)
         if args.command == "dismiss-pending-reply":
             return cmd_dismiss_pending_reply(
                 layer, args.reply_id,

@@ -1458,6 +1458,36 @@ pub struct ActionableEvent {
     pub sensitivity_tier: i32,
 }
 
+/// One known attendee's standing going into a meeting.
+///
+/// # sensitivity_tier: 3
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingPrepAttendee {
+    pub contact_name: String,
+    pub situation: Option<String>,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    pub last_message_at: Option<String>,
+    pub last_message_preview: Option<String>,
+    #[serde(default)]
+    pub open_loops: Vec<serde_json::Value>,
+}
+
+/// A prep pack for an upcoming meeting with known attendees.
+///
+/// # sensitivity_tier: 3
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingPrepBrief {
+    pub event_id: String,
+    pub title: String,
+    pub start_time: String,
+    pub location: Option<String>,
+    #[serde(default)]
+    pub attendees: Vec<MeetingPrepAttendee>,
+    #[serde(default)]
+    pub generated_at: String,
+}
+
 /// A single entry in the topic digest notification.
 ///
 /// # sensitivity_tier: 3
