@@ -43,8 +43,6 @@ def _isolate(tmp_path, monkeypatch):
     reset_egress_firewall_for_tests(
         policy=EgressPolicy(
             routing="balanced",
-            allow_tier3_egress=False,
-            per_agent_tier3_allow=frozenset(),
         ),
     )
     reset_default_scheduler_for_tests(SchedulerConfig())
