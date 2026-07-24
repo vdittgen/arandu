@@ -49,11 +49,13 @@ LOCAL_FALLBACK_MODEL = "gemma4:e2b"
 
 
 class Lane(enum.Enum):
-    """Traffic lanes used by the spend-cap planning.
+    """Traffic lane a request is attributed to.
 
-    Each lane has an independent monthly cap (Phase 1) and a default
-    routing target. The five lanes match the budget allocation in
-    ``docs/plans/implementation_plan_egress_spend_cap.md``.
+    The lane categorises each request by its origin (background work,
+    an interactive turn, the sensitivity classifier, an escalation, or
+    coding) so the gateway can pick a scheduler tier and the audit
+    chain can attribute the call. See ``_tier_to_scheduler`` in
+    ``llm_gateway``.
 
     sensitivity_tier: 1
     """
@@ -195,23 +197,15 @@ class EgressPolicy:
 
     In Arandu the ``routing`` field does not affect where calls
     go — every route resolves to local Ollama. The field is retained
-    as a reserved extension point. Derived from the single
-    user-facing setting ``local_inference_for_sensitive``.
-
-    The legacy ``allow_tier3_egress`` / ``per_agent_tier3_allow`` /
-    ``tier3_provider_baa_signed`` fields are accepted by the dataclass
-    for backwards-compatibility (old tests still pass them) but do
-    not influence routing.
+    as a reserved extension point (and recorded in the audit chain).
+    Derived from the single user-facing setting
+    ``local_inference_for_sensitive``.
 
     sensitivity_tier: 1
     """
 
     routing: RoutingPolicy = "remote-default"
     local_inference_for_sensitive: bool = False
-    # --- deprecated, retained for backwards-compatibility ------------
-    allow_tier3_egress: bool = False
-    per_agent_tier3_allow: frozenset[str] = frozenset()
-    tier3_provider_baa_signed: bool = False
 
 
 def _settings() -> dict[str, object]:
