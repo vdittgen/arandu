@@ -27,6 +27,7 @@ import { Sun, Sunset, Moon } from "lucide-react";
 import CommandBar from "../components/dashboard/CommandBar";
 import DailyBrief from "../components/dashboard/DailyBrief";
 import TodayBoard from "../components/dashboard/today/TodayBoard";
+import MeetingPrepCard from "../components/dashboard/MeetingPrepCard";
 import AgentStream from "../components/dashboard/agents/AgentStream";
 import LifeBoard from "../components/dashboard/life/LifeBoard";
 import AmbientBar from "../components/dashboard/AmbientBar";
@@ -223,6 +224,7 @@ function Dashboard() {
       </div>
 
       <TodayBoard />
+      <MeetingPrepCard />
       <LifeBoard />
       <AmbientBar />
     </div>

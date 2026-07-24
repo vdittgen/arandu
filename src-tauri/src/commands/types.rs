@@ -1458,6 +1458,36 @@ pub struct ActionableEvent {
     pub sensitivity_tier: i32,
 }
 
+/// One known attendee's standing going into a meeting.
+///
+/// # sensitivity_tier: 3
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingPrepAttendee {
+    pub contact_name: String,
+    pub situation: Option<String>,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    pub last_message_at: Option<String>,
+    pub last_message_preview: Option<String>,
+    #[serde(default)]
+    pub open_loops: Vec<serde_json::Value>,
+}
+
+/// A prep pack for an upcoming meeting with known attendees.
+///
+/// # sensitivity_tier: 3
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingPrepBrief {
+    pub event_id: String,
+    pub title: String,
+    pub start_time: String,
+    pub location: Option<String>,
+    #[serde(default)]
+    pub attendees: Vec<MeetingPrepAttendee>,
+    #[serde(default)]
+    pub generated_at: String,
+}
+
 /// A single entry in the topic digest notification.
 ///
 /// # sensitivity_tier: 3
@@ -2615,6 +2645,15 @@ pub struct Goal {
     /// and horizon so the dashboard can rank goals by what's pressing.
     #[serde(default)]
     pub urgency_score: i32,
+    /// Decay verdict for a brain-mined goal whose evidence has gone
+    /// stale (`fresh` / `fading` / `stale`). Always `fresh` for
+    /// user-entered goals. Derived at list-time; not persisted.
+    #[serde(default = "default_fresh_decay")]
+    pub decay_state: String,
+    /// Days since the goal's evidence anchor (`last_confirmed_at`, else
+    /// `created_at`). Derived at list-time; not persisted.
+    #[serde(default)]
+    pub days_since_confirmed: i32,
 }
 
 /// A grouping of tasks. May roll up under a goal or topic.
@@ -2751,6 +2790,9 @@ fn default_todo_status() -> String {
 }
 fn default_user_source() -> String {
     "user".to_string()
+}
+fn default_fresh_decay() -> String {
+    "fresh".to_string()
 }
 fn default_daily_cadence() -> String {
     "daily".to_string()

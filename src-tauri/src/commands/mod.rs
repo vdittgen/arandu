@@ -2300,6 +2300,29 @@ pub async fn get_actionable_events(
     })
 }
 
+/// Prep briefs for upcoming meetings with known attendees.
+///
+/// Deterministically composed by the Python CLI from cached contact
+/// contexts + the enriched-events / contact-topics marts (no LLM), so
+/// it's cheap to call on page load.
+///
+/// # sensitivity_tier: 3
+#[tauri::command]
+pub async fn get_meeting_prep_briefs(
+    within_hours: Option<f64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<types::MeetingPrepBrief>, String> {
+    let hours = within_hours.unwrap_or(24.0).to_string();
+    let output = call_python_cli(
+        &["get-meeting-prep-briefs", "--within-hours", &hours],
+        &state.project_root,
+    )
+    .await?;
+    serde_json::from_str(&output).map_err(|e| {
+        format!("Failed to parse meeting prep briefs: {e}")
+    })
+}
+
 /// Dismiss a pending reply.
 ///
 /// # sensitivity_tier: 1

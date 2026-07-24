@@ -35,7 +35,7 @@ class Goal:
     category: str = "personal"  # personal | life | work
     horizon: str = "medium"     # short | medium | long
     target_date: str | None = None
-    status: str = "active"      # active | paused | achieved | abandoned
+    status: str = "active"  # active | paused | achieved | abandoned | archived
     importance: int = 5
     why: str = ""
     source: str = "user"        # user | brain

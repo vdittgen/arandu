@@ -14,6 +14,8 @@ sensitivity_tier: 3
 from src.agents.proactive.persistence import (
     ActionableEvent,
     ContactContext,
+    MeetingPrepAttendee,
+    MeetingPrepBrief,
     PendingReply,
     ProactiveIntelligence,
     ProactiveResult,
@@ -23,6 +25,8 @@ from src.agents.proactive.persistence import (
 __all__ = [
     "ActionableEvent",
     "ContactContext",
+    "MeetingPrepAttendee",
+    "MeetingPrepBrief",
     "PendingReply",
     "ProactiveIntelligence",
     "ProactiveResult",

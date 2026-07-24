@@ -94,6 +94,47 @@ def _extract_email_addr(raw: str) -> str:
     return candidate
 
 
+def _to_local_naive(dt: datetime) -> datetime:
+    """Normalize to a naive *local* datetime for comparison.
+
+    An aware value (the mart stores UTC ``…Z`` start times) is
+    converted to the machine's local zone before dropping tzinfo; a
+    naive value is assumed already-local and passed through. This keeps
+    the window check correct against a naive-local ``now`` — comparing
+    a UTC wall-clock directly would shift every event by the local UTC
+    offset.
+
+    sensitivity_tier: 1
+    """
+    if dt.tzinfo is not None:
+        return dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def _within_window(start_time: str, now: datetime, within_hours: float) -> bool:
+    """True if ``start_time`` falls in ``(now, now + within_hours]``.
+
+    Tolerant of ISO strings with or without a ``T`` / timezone; returns
+    False on anything unparseable so a bad row never surfaces a brief.
+
+    sensitivity_tier: 1
+    """
+    if not start_time:
+        return False
+    raw = start_time.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(raw[:19].replace("T", " "))
+        except ValueError:
+            return False
+    dt = _to_local_naive(dt)
+    ref = _to_local_naive(now)
+    delta_h = (dt - ref).total_seconds() / 3600.0
+    return 0 < delta_h <= within_hours
+
+
 # ------------------------------------------------------------------
 # Data classes
 # ------------------------------------------------------------------
@@ -162,6 +203,44 @@ class ActionableEvent:
     importance: int = 5
     detected_at: str = ""
     sensitivity_tier: int = 2
+
+
+@dataclass(frozen=True)
+class MeetingPrepAttendee:
+    """One known attendee's standing going into a meeting.
+
+    Composed from already-cached data (``_contact_contexts`` +
+    ``int_contact_topics``) — no LLM.
+
+    sensitivity_tier: 3
+    """
+
+    contact_name: str
+    situation: str | None = None
+    domains: list[str] = field(default_factory=list)
+    last_message_at: str | None = None
+    last_message_preview: str | None = None
+    open_loops: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MeetingPrepBrief:
+    """A "before your 2pm with X, here's where things stand" pack.
+
+    Deterministically composed for an upcoming calendar event with
+    known attendees from the enriched-events mart + cached contact
+    contexts + per-contact topics. No LLM runs on read, so it's cheap
+    enough for page load.
+
+    sensitivity_tier: 3
+    """
+
+    event_id: str
+    title: str
+    start_time: str
+    location: str | None = None
+    attendees: list[MeetingPrepAttendee] = field(default_factory=list)
+    generated_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -2179,6 +2258,144 @@ class ProactiveIntelligence:
             )
             for r in rows
         ]
+
+    # ----------------------------------------------------------
+    # Meeting prep briefs (deterministic, no LLM — safe on page load)
+    # ----------------------------------------------------------
+
+    def get_meeting_prep_briefs(
+        self,
+        *,
+        within_hours: float = 24.0,
+        limit: int = 10,
+        now: datetime | None = None,
+    ) -> list[MeetingPrepBrief]:
+        """Compose prep packs for upcoming meetings with known attendees.
+
+        For each calendar event starting within ``within_hours`` that
+        has at least one known attendee, gather every attendee's
+        situation summary + active domains (from the cached
+        ``_contact_contexts``), their open loops (from
+        ``int_contact_topics``), and their last message — a "here's
+        where things stand" card. Pure joins over already-computed
+        data: no LLM, so it's cheap enough to build on read.
+
+        Returns briefs soonest-first. Empty when the enriched-events
+        mart is absent (pipeline hasn't run) or nothing is upcoming.
+
+        sensitivity_tier: 3
+        """
+        if not table_exists(self._db, "int_events_enriched"):
+            return []
+
+        now = now or datetime.now()
+        try:
+            rows = self._db.query("""
+                SELECT id, title, start_time, location,
+                       known_attendee_names
+                FROM int_events_enriched
+                WHERE known_attendee_names IS NOT NULL
+                  AND TRIM(known_attendee_names) != ''
+                  AND start_time IS NOT NULL
+                ORDER BY start_time ASC
+            """)
+        except Exception:  # noqa: BLE001
+            logger.debug("meeting-prep event scan failed", exc_info=True)
+            return []
+
+        upcoming = [
+            r for r in rows
+            if _within_window(str(r.get("start_time") or ""), now, within_hours)
+        ]
+        if not upcoming:
+            return []
+
+        contexts = {
+            c.contact_name.strip().lower(): c
+            for c in self.get_contact_contexts(limit=200)
+        }
+        loops_by_contact = self._open_loops_by_contact()
+
+        briefs: list[MeetingPrepBrief] = []
+        for r in upcoming[: max(0, limit)]:
+            names = [
+                n.strip()
+                for n in str(r.get("known_attendee_names") or "").split(",")
+                if n.strip()
+            ]
+            attendees: list[MeetingPrepAttendee] = []
+            seen: set[str] = set()
+            for name in names:
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                ctx = contexts.get(key)
+                attendees.append(MeetingPrepAttendee(
+                    contact_name=(ctx.contact_name if ctx else name),
+                    situation=ctx.active_context if ctx else None,
+                    domains=list(ctx.context_domains) if ctx else [],
+                    last_message_at=ctx.last_message_at if ctx else None,
+                    last_message_preview=(
+                        ctx.last_message_preview if ctx else None
+                    ),
+                    open_loops=loops_by_contact.get(key, []),
+                ))
+            # A brief where no attendee carries any situation, open loop,
+            # or last message is a contextless name echo (e.g. a solo
+            # calendar hold) — skip it rather than clutter the surface.
+            if not any(
+                a.situation or a.open_loops or a.last_message_preview
+                for a in attendees
+            ):
+                continue
+            briefs.append(MeetingPrepBrief(
+                event_id=str(r.get("id") or ""),
+                title=str(r.get("title") or "Untitled event"),
+                start_time=str(r.get("start_time") or ""),
+                location=(
+                    str(r["location"]) if r.get("location") else None
+                ),
+                attendees=attendees,
+                generated_at=utc_now_iso(),
+            ))
+        return briefs
+
+    def _open_loops_by_contact(
+        self, per_contact: int = 3,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Active per-contact topics, keyed by lower-cased contact name.
+
+        The "open loops" going into a meeting. Reads the
+        ``int_contact_topics`` mart; returns ``{}`` when absent.
+
+        sensitivity_tier: 3
+        """
+        if not table_exists(self._db, "int_contact_topics"):
+            return {}
+        try:
+            rows = self._db.query("""
+                SELECT contact_name, topic, description, importance
+                FROM int_contact_topics
+                WHERE status = 'active'
+                ORDER BY importance DESC
+            """)
+        except Exception:  # noqa: BLE001
+            return {}
+        out: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            key = str(r.get("contact_name") or "").strip().lower()
+            if not key:
+                continue
+            bucket = out.setdefault(key, [])
+            if len(bucket) >= per_contact:
+                continue
+            bucket.append({
+                "topic": str(r.get("topic") or ""),
+                "description": safe_str(r.get("description"), 200),
+                "importance": int(r.get("importance") or 0),
+            })
+        return out
 
     # ----------------------------------------------------------
     # User actions
