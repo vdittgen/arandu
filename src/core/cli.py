@@ -4741,6 +4741,37 @@ def cmd_get_pending_replies(layer: DataLayer) -> int:
         return 1
 
 
+def cmd_proactive_status(layer: DataLayer) -> int:
+    """Return proactive loop freshness/status as JSON.
+
+    Surfaces when the proactive evaluation last completed successfully
+    so the Dashboard can flag silent starvation (a skipped/failed loop
+    is indistinguishable from "nothing to report" without it).
+
+    Args:
+        layer: An open DataLayer instance.
+
+    Returns:
+        Exit code (0 = success, 1 = failure).
+
+    sensitivity_tier: 1
+    """
+    try:
+        from src.agents.proactive import ProactiveIntelligence
+
+        pi = ProactiveIntelligence(
+            db_engine=layer.duckdb,
+        )
+        print(_json_output(pi.get_status()))
+        return 0
+    except Exception as exc:
+        print(
+            _json_output({"error": str(exc)}),
+            file=sys.stderr,
+        )
+        return 1
+
+
 def cmd_get_contact_contexts(layer: DataLayer) -> int:
     """Return contact contexts as JSON.
 
@@ -9170,6 +9201,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Get pending replies (JSON)",
     )
     subparsers.add_parser(
+        "proactive-status",
+        help="Get proactive loop freshness/status (JSON)",
+    )
+    subparsers.add_parser(
         "get-contact-contexts",
         help="Get contact contexts (JSON)",
     )
@@ -10269,6 +10304,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_evaluate_proactive(layer)
         if args.command == "get-pending-replies":
             return cmd_get_pending_replies(layer)
+        if args.command == "proactive-status":
+            return cmd_proactive_status(layer)
         if args.command == "get-contact-contexts":
             return cmd_get_contact_contexts(layer)
         if args.command == "get-actionable-events":

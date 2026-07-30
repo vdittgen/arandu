@@ -1522,6 +1522,26 @@ pub struct ProactiveResult {
     pub evaluated_at: String,
 }
 
+/// Freshness snapshot of the proactive loop.
+///
+/// `last_evaluated_at` is the timestamp of the last *fully successful*
+/// evaluation cycle; `None` means no cycle has ever completed — the
+/// Dashboard flags that (and long gaps) as starvation, which would
+/// otherwise be indistinguishable from "nothing to report".
+///
+/// # sensitivity_tier: 1
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProactiveStatus {
+    #[serde(default)]
+    pub last_evaluated_at: Option<String>,
+    #[serde(default)]
+    pub pending_replies: i64,
+    #[serde(default)]
+    pub contact_contexts: i64,
+    #[serde(default)]
+    pub actionable_events: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Background task status types
 // ---------------------------------------------------------------------------

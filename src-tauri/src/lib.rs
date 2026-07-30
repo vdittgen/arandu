@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use keep_awake::CaffeinateHandle;
 use ollama_supervisor::OllamaSupervisor;
@@ -17,6 +17,77 @@ use whatsapp_supervisor::Supervisor;
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! Welcome to Arandu.", name)
+}
+
+// ---------------------------------------------------------------------------
+// Background scheduler: deadline-based catch-up
+// ---------------------------------------------------------------------------
+
+/// Why a background scheduler tick was deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TickDeferral {
+    /// The pipeline worker holds the data plane — skip to avoid
+    /// SQLite write-lock contention.
+    PipelineRunning,
+    /// Another write-mode CLI task holds `cli_write_lock`.
+    WriteLockBusy,
+}
+
+impl TickDeferral {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::PipelineRunning => "pipeline running",
+            Self::WriteLockBusy => "write lock busy",
+        }
+    }
+}
+
+/// Counts consecutive deferred ticks for one background loop so
+/// starvation is visible in the logs (previously a skipped tick was
+/// indistinguishable from "nothing to do") and the catch-up run is
+/// announced.
+#[derive(Default)]
+struct SkipTracker(u32);
+
+impl SkipTracker {
+    fn deferred(&mut self, task: &str, reason: &str) {
+        self.0 += 1;
+        eprintln!(
+            "[lib] {task} deferred ({reason}); {} consecutive deferral(s) — will catch up as soon as it clears",
+            self.0,
+        );
+    }
+
+    fn ran(&mut self, task: &str) {
+        if self.0 > 0 {
+            eprintln!(
+                "[lib] {task} catching up after {} deferred tick(s)",
+                self.0,
+            );
+        }
+        self.0 = 0;
+    }
+}
+
+/// Try to claim the slot a background CLI task needs for one tick.
+///
+/// Returns the write-lock guard (held by the caller across the CLI
+/// call) when the tick should run now, or the reason it must be
+/// deferred. `check_pipeline` gates on the pipeline flag in addition
+/// to the lock — loops that contend with the pipeline worker's DB
+/// writes (proactive eval) pass `true`; loops that only need the
+/// write lock (scheduled agents) pass `false`.
+async fn claim_background_slot(
+    state: &commands::AppState,
+    check_pipeline: bool,
+) -> Result<tokio::sync::MutexGuard<'_, ()>, TickDeferral> {
+    if check_pipeline && commands::is_pipeline_flag_set(state).await {
+        return Err(TickDeferral::PipelineRunning);
+    }
+    state
+        .cli_write_lock
+        .try_lock()
+        .map_err(|_| TickDeferral::WriteLockBusy)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -172,6 +243,7 @@ pub fn run() {
             // Proactive intelligence commands
             commands::evaluate_proactive,
             commands::get_pending_replies,
+            commands::get_proactive_status,
             commands::get_contact_contexts,
             commands::get_actionable_events,
             commands::get_meeting_prep_briefs,
@@ -445,32 +517,43 @@ pub fn run() {
             });
 
             // Scheduled agent runner: check cron schedules every 60 seconds.
-            // Uses try_lock to skip if another write-mode task is running.
+            // Deadline-based catch-up: a deferred tick (write lock busy)
+            // retries after `retry` and runs as soon as the lock frees,
+            // instead of silently starving for whole intervals.
             let handle5 = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 let interval = std::time::Duration::from_secs(60);
+                let retry = std::time::Duration::from_secs(15);
+                let mut tracker = SkipTracker::default();
                 loop {
                     let state = handle5.state::<commands::AppState>();
-                    if let Ok(_guard) = state.cli_write_lock.try_lock() {
-                        commands::register_task(&state, "scheduled-agents", "Running agents").await;
-                        let _ = commands::bridge::call_python_cli_with_timeout(
-                            &["run-scheduled-agents"], &state.project_root, 300,
-                        ).await;
-                        commands::unregister_task(&state, "scheduled-agents").await;
-                        drop(_guard);
-                    } else {
-                        eprintln!("[lib] skipping run-scheduled-agents: write lock busy");
-                    }
-                    tokio::time::sleep(interval).await;
+                    match claim_background_slot(&state, false).await {
+                        Ok(_guard) => {
+                            tracker.ran("run-scheduled-agents");
+                            commands::register_task(&state, "scheduled-agents", "Running agents").await;
+                            let _ = commands::bridge::call_python_cli_with_timeout(
+                                &["run-scheduled-agents"], &state.project_root, 300,
+                            ).await;
+                            commands::unregister_task(&state, "scheduled-agents").await;
+                            drop(_guard);
+                            tokio::time::sleep(interval).await;
+                        }
+                        Err(deferral) => {
+                            tracker.deferred("run-scheduled-agents", deferral.reason());
+                            tokio::time::sleep(retry).await;
+                        }
+                    };
                 }
             });
 
             // Proactive intelligence: evaluate every 2 hours.
             // First run after 7 min (after insights at +5min finishes), plus
             // any first_run_grace_minutes set in settings.json.
-            // Uses try_lock — skips if another LLM-using task is running
-            // to avoid Ollama lock contention on single-GPU hardware.
+            // Deadline-based catch-up: a deferred tick (pipeline running or
+            // write lock busy) retries after `retry` and runs as soon as
+            // the blockage clears — the 2h evidence-producing cycle can no
+            // longer be skipped indefinitely on an active machine.
             let handle6 = app.handle().clone();
             let proactive_grace = grace;
             tauri::async_runtime::spawn(async move {
@@ -478,25 +561,40 @@ pub fn run() {
                     std::time::Duration::from_secs(420) + proactive_grace,
                 ).await;
                 let interval = std::time::Duration::from_secs(2 * 3600);
+                let retry = std::time::Duration::from_secs(60);
+                let mut tracker = SkipTracker::default();
                 loop {
                     let state = handle6.state::<commands::AppState>();
-                    if commands::is_pipeline_flag_set(&state).await {
-                        eprintln!("[lib] skipping proactive-eval: pipeline running");
-                    } else if let Ok(_guard) = state.cli_write_lock.try_lock() {
-                        commands::register_task(&state, "proactive-eval", "Proactive evaluation").await;
-                        eprintln!("[lib] starting proactive intelligence evaluation");
-                        match commands::bridge::call_python_cli_with_timeout(
-                            &["evaluate-proactive"], &state.project_root, 900,
-                        ).await {
-                            Ok(_) => eprintln!("[lib] proactive eval completed"),
-                            Err(e) => eprintln!("[lib] proactive eval failed: {e}"),
+                    match claim_background_slot(&state, true).await {
+                        Ok(_guard) => {
+                            tracker.ran("proactive-eval");
+                            commands::register_task(&state, "proactive-eval", "Proactive evaluation").await;
+                            eprintln!("[lib] starting proactive intelligence evaluation");
+                            match commands::bridge::call_python_cli_with_timeout(
+                                &["evaluate-proactive"], &state.project_root, 900,
+                            ).await {
+                                Ok(_) => {
+                                    eprintln!("[lib] proactive eval completed");
+                                    // The background loop bypasses the `evaluate_proactive`
+                                    // command, so it must emit the refresh event itself —
+                                    // otherwise the AmbientBar freshness indicator (and the
+                                    // LifeBoard panels behind Layout's re-broadcast) never
+                                    // learn a background cycle completed.
+                                    if let Err(e) = handle6.emit("arandu:proactive-refreshed", ()) {
+                                        eprintln!("[lib] failed to emit proactive-refreshed: {e}");
+                                    }
+                                }
+                                Err(e) => eprintln!("[lib] proactive eval failed: {e}"),
+                            }
+                            commands::unregister_task(&state, "proactive-eval").await;
+                            drop(_guard);
+                            tokio::time::sleep(interval).await;
                         }
-                        commands::unregister_task(&state, "proactive-eval").await;
-                        drop(_guard);
-                    } else {
-                        eprintln!("[lib] skipping proactive-eval: write lock busy");
-                    }
-                    tokio::time::sleep(interval).await;
+                        Err(deferral) => {
+                            tracker.deferred("proactive-eval", deferral.reason());
+                            tokio::time::sleep(retry).await;
+                        }
+                    };
                 }
             });
 
@@ -553,4 +651,61 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_claim_background_slot_granted_when_idle() {
+        let state = commands::AppState::new();
+        let guard = claim_background_slot(&state, true).await;
+        assert!(guard.is_ok(), "idle state must grant the slot");
+    }
+
+    #[tokio::test]
+    async fn test_claim_background_slot_deferred_by_write_lock_contention() {
+        // Artificial lock contention: hold the write lock the way a
+        // long sync/startup task would — a scheduler tick must defer
+        // (not skip silently, not block) and say why.
+        let state = commands::AppState::new();
+        let _held = state.cli_write_lock.lock().await;
+
+        let result = claim_background_slot(&state, false).await;
+        assert_eq!(result.unwrap_err(), TickDeferral::WriteLockBusy);
+
+        // Once the contention clears, the very next tick runs — the
+        // deadline-based catch-up property the loops rely on.
+        drop(_held);
+        assert!(claim_background_slot(&state, false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_claim_background_slot_pipeline_flag_only_when_checked() {
+        let state = commands::AppState::new();
+        {
+            let mut running = state.pipeline_running.lock().await;
+            *running = Some(tokio::time::Instant::now());
+        }
+
+        // Proactive-style loops gate on the pipeline flag...
+        let result = claim_background_slot(&state, true).await;
+        assert_eq!(result.unwrap_err(), TickDeferral::PipelineRunning);
+
+        // ...lock-only loops (scheduled agents) keep their original
+        // semantics and may proceed when the lock is free.
+        assert!(claim_background_slot(&state, false).await.is_ok());
+    }
+
+    #[test]
+    fn test_skip_tracker_counts_then_resets() {
+        let mut tracker = SkipTracker::default();
+        assert_eq!(tracker.0, 0);
+        tracker.deferred("task", "write lock busy");
+        tracker.deferred("task", "write lock busy");
+        assert_eq!(tracker.0, 2);
+        tracker.ran("task");
+        assert_eq!(tracker.0, 0);
+    }
 }
