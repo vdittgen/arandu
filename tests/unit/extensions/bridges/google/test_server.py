@@ -231,6 +231,74 @@ def test_gmail_maps_headers_labels_and_recipients(
     assert row["is_read"] is False
 
 
+def test_gmail_sent_mail_lands_in_sent_folder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sent mail must carry a folder the reply sweep recognises.
+
+    `sweep_resolved_pending_replies` resolves a Gmail pending reply by
+    finding a later row with ``LOWER(folder) LIKE '%sent%'`` addressed
+    to the same correspondent — the convention the Apple Mail bridge
+    established. Mapping sent mail to ARCHIVE silently breaks that.
+    """
+    detail = _gmail_detail()
+    detail["labelIds"] = ["SENT"]
+    _stub_api(
+        monkeypatch,
+        {
+            "/gmail/v1/users/me/messages/": detail,
+            "/gmail/v1/users/me/messages": {"messages": [{"id": "m1"}]},
+        },
+    )
+    row = server.list_emails({})[0]
+
+    assert "sent" in row["folder"].lower()
+
+
+def test_gmail_drafts_are_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drafts are not correspondence and must not become email rows."""
+    draft = _gmail_detail("d1")
+    draft["labelIds"] = ["DRAFT"]
+    _stub_api(
+        monkeypatch,
+        {
+            "/gmail/v1/users/me/messages/d1": draft,
+            "/gmail/v1/users/me/messages/m1": _gmail_detail(),
+            "/gmail/v1/users/me/messages": {
+                "messages": [{"id": "d1"}, {"id": "m1"}],
+            },
+        },
+    )
+    rows = server.list_emails({})
+
+    assert [r["id"] for r in rows] == ["gmail:m1"]
+
+
+def test_gmail_quoted_display_name_with_comma(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A comma inside a quoted display name is not a recipient split."""
+    detail = _gmail_detail()
+    detail["payload"]["headers"] = [
+        h for h in detail["payload"]["headers"] if h["name"] != "To"
+    ] + [{
+        "name": "To",
+        "value": '"Doe, John" <jdoe@example.com>, ana@example.com',
+    }]
+    _stub_api(
+        monkeypatch,
+        {
+            "/gmail/v1/users/me/messages/": detail,
+            "/gmail/v1/users/me/messages": {"messages": [{"id": "m1"}]},
+        },
+    )
+    row = server.list_emails({})[0]
+
+    assert row["to_addresses"] == ["jdoe@example.com", "ana@example.com"]
+
+
 def test_gmail_never_requests_message_bodies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

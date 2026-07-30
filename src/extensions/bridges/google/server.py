@@ -38,7 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any
 
 SERVER_NAME = "arandu-google-bridge"
@@ -343,9 +343,34 @@ def _split_addresses(raw: str) -> list[str]:
     (``json_array`` transform), so a single joined string would land as a
     one-element array and break any per-recipient consumer.
 
+    ``getaddresses`` rather than a comma split: a quoted display name
+    may itself contain a comma (``"Doe, John" <jdoe@example.com>``), and
+    a naive split shears that into two garbage entries — one of which
+    would defeat the pending-replies sweep's address matching.
+
     sensitivity_tier: 3
     """
-    return [part.strip() for part in raw.split(",") if part.strip()]
+    if not raw:
+        return []
+    return [addr for _, addr in getaddresses([raw]) if addr]
+
+
+def _folder(label_ids: list[Any]) -> str:
+    """Map Gmail labels onto the folder vocabulary downstream reads.
+
+    ``Sent`` matters most: the pending-replies sweep resolves a reply by
+    finding a later Sent-folder row addressed to the same correspondent
+    (``LOWER(folder) LIKE '%sent%'``, matching what the Apple Mail
+    bridge writes). Mapping sent mail to ``ARCHIVE`` would leave Gmail
+    pending replies resolving only on the weaker is-read signal.
+
+    sensitivity_tier: 1
+    """
+    if "SENT" in label_ids:
+        return "Sent"
+    if "INBOX" in label_ids:
+        return "INBOX"
+    return "ARCHIVE"
 
 
 def _headers_map(payload: dict[str, Any]) -> dict[str, str]:
@@ -480,6 +505,10 @@ def list_emails(arguments: dict[str, Any]) -> list[dict[str, Any]]:
         label_ids = detail.get("labelIds") or []
         if not isinstance(label_ids, list):
             label_ids = []
+        if "DRAFT" in label_ids:
+            # Drafts aren't correspondence — ingesting one creates a
+            # phantom email that was never sent or received.
+            continue
         rows.append({
             "id": f"gmail:{message_id}",
             "source": "gmail",
@@ -488,7 +517,7 @@ def list_emails(arguments: dict[str, Any]) -> list[dict[str, Any]]:
             "to_addresses": _split_addresses(headers.get("to", "")),
             "date": _email_date_iso(headers.get("date", "")) or "",
             "body_preview": detail.get("snippet") or "",
-            "folder": "INBOX" if "INBOX" in label_ids else "ARCHIVE",
+            "folder": _folder(label_ids),
             "is_read": "UNREAD" not in label_ids,
         })
     return rows
