@@ -25,6 +25,20 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _provider_label(provider: str) -> str:
+    """Human-readable name for an OAuth provider key.
+
+    Provider keys carry an ``_oauth`` suffix by convention
+    (``spotify_oauth``, ``google_oauth``) because it becomes the Keychain
+    service name. Titling the raw key surfaced "Sign in with Google
+    Oauth" in the UI, so drop the suffix for display.
+
+    sensitivity_tier: 1
+    """
+    stem = provider[: -len("_oauth")] if provider.endswith("_oauth") else provider
+    return stem.replace("_", " ").title() or provider
+
+
 @dataclass(frozen=True)
 class MissingRequirement:
     """A single unmet requirement for enabling a connector.
@@ -346,7 +360,7 @@ class RequirementChecker:
                     MissingRequirement(
                         requirement_type="oauth",
                         key=requires_auth,
-                        label=f"Sign in with {requires_auth.replace('_', ' ').title()}",
+                        label=f"Sign in with {_provider_label(requires_auth)}",
                         action="start_oauth",
                     )
                 )

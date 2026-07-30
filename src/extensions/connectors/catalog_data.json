@@ -918,6 +918,228 @@
       "note": "Local SQLite bridge — reads from macOS Messages chat.db. Requires Full Disk Access."
     },
     {
+      "id": "google-calendar",
+      "name": "Google Calendar",
+      "category": "google",
+      "icon": "📆",
+      "description": "Sync Google Calendar events",
+      "command": "python3",
+      "args": [
+        "-m",
+        "src.extensions.bridges.google.server"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_calendar_events",
+          "tool_type": "data",
+          "target_table": "raw_calendar_events",
+          "dedup_key": [
+            "id"
+          ],
+          "fields": [
+            {
+              "source_name": "title",
+              "target_column": "title",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "start_time",
+              "target_column": "start_time",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "end_time",
+              "target_column": "end_time",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "location",
+              "target_column": "location",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "attendees",
+              "target_column": "attendees",
+              "source_type": "array",
+              "target_type": "JSON",
+              "sensitivity_tier": 2,
+              "transform": "json_array"
+            },
+            {
+              "source_name": "description",
+              "target_column": "description",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "is_all_day",
+              "target_column": "is_all_day",
+              "source_type": "boolean",
+              "target_type": "BOOLEAN",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "calendar_name",
+              "target_column": "calendar_name",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "self_response_status",
+              "target_column": "self_response_status",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "event_origin",
+              "target_column": "event_origin",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            }
+          ]
+        }
+      ],
+      "requires_permission": null,
+      "requires_auth": "google_oauth",
+      "requires_env": {},
+      "requires_app": null,
+      "platforms": [
+        "macos",
+        "linux",
+        "windows"
+      ],
+      "min_version": null,
+      "default_enabled": false,
+      "default_schedule": "every_15min",
+      "estimated_first_sync_seconds": 45,
+      "note": "Authorize Google once; recurring events are expanded into instances."
+    },
+    {
+      "id": "google-gmail",
+      "name": "Gmail",
+      "category": "google",
+      "icon": "✉️",
+      "description": "Sync Gmail message metadata (subject, sender, snippet)",
+      "command": "python3",
+      "args": [
+        "-m",
+        "src.extensions.bridges.google.server"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_emails",
+          "tool_type": "data",
+          "target_table": "raw_emails",
+          "dedup_key": [
+            "id"
+          ],
+          "fields": [
+            {
+              "source_name": "subject",
+              "target_column": "subject",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "source",
+              "target_column": "source",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "from_address",
+              "target_column": "from_address",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "to_addresses",
+              "target_column": "to_addresses",
+              "source_type": "array",
+              "target_type": "JSON",
+              "sensitivity_tier": 2,
+              "transform": "json_array"
+            },
+            {
+              "source_name": "date",
+              "target_column": "date",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "body_preview",
+              "target_column": "body_preview",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 3,
+              "transform": null
+            },
+            {
+              "source_name": "is_read",
+              "target_column": "is_read",
+              "source_type": "boolean",
+              "target_type": "BOOLEAN",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "folder",
+              "target_column": "folder",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            }
+          ]
+        }
+      ],
+      "requires_permission": null,
+      "requires_auth": "google_oauth",
+      "requires_env": {},
+      "requires_app": null,
+      "platforms": [
+        "macos",
+        "linux",
+        "windows"
+      ],
+      "min_version": null,
+      "default_enabled": false,
+      "default_schedule": "hourly",
+      "estimated_first_sync_seconds": 90,
+      "note": "Metadata and snippet only — message bodies are never fetched."
+    },
+    {
       "id": "filesystem",
       "name": "Files & Documents",
       "category": "files",
