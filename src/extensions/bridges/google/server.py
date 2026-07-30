@@ -199,7 +199,10 @@ def _keychain_write(value: str) -> None:
             check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        print(f"Warning: could not persist Google credentials to Keychain: {exc}", file=sys.stderr)
+        print(
+            f"Warning: could not persist Google credentials to Keychain: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _load_credential() -> _Credential:
