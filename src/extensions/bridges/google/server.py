@@ -13,10 +13,13 @@ be a lot of weight (and a lot of new supply-chain) for that.
 
 **Auth** reuses the OAuth machinery the connector requirements layer
 already has (`src/extensions/connectors/requirements.py`): the user
-authorizes in their own browser, the loopback handler stores the access
-token in the macOS Keychain under `arandu-oauth-google_oauth`, and this
-bridge reads it back. No client secret and no token ever lives in the
-repo or in settings.json.
+authorizes in their own browser, the PKCE code exchange stores a JSON
+credential (access + refresh token, expiry, token endpoint) in the
+macOS Keychain under `arandu-oauth-google_oauth`, and this bridge reads
+it back — refreshing the ~1h access token itself, proactively on expiry
+and once more on a mid-call 401. Legacy bare-token entries still work,
+minus the refresh. No client secret and no token ever lives in the repo
+or in settings.json.
 
 **Body content is deliberately not fetched.** Gmail messages are read
 with `format=metadata`, which returns headers plus Google's own
@@ -37,6 +40,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any
@@ -109,18 +113,38 @@ TOOLS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
-def _access_token() -> str:
-    """Return the stored Google access token.
+@dataclass(frozen=True)
+class _Credential:
+    """Parsed Google credential, bare-token or refreshable JSON form.
 
-    Env var first so tests and CI never touch the Keychain (and never
-    need a real Google account); otherwise read the entry the OAuth
-    loopback flow wrote.
+    The OAuth flow stores a JSON blob (access + refresh token, expiry,
+    token endpoint, client id/secret) when a token URL is configured;
+    older installs may hold a bare access-token string. Env-supplied
+    tokens (test seam) are never refreshed or persisted.
 
-    sensitivity_tier: 3 (returns a bearer token)
+    sensitivity_tier: 3 (carries bearer tokens)
     """
-    env_token = os.environ.get(TOKEN_ENV_VAR, "").strip()
-    if env_token:
-        return env_token
+
+    access_token: str
+    refresh_token: str = ""
+    expires_at: str = ""
+    token_url: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    from_env: bool = False
+
+    @property
+    def refreshable(self) -> bool:
+        return bool(
+            self.refresh_token and self.token_url and not self.from_env,
+        )
+
+
+def _keychain_read() -> str:
+    """Read the raw Keychain entry the OAuth flow wrote.
+
+    sensitivity_tier: 3 (returns credential material)
+    """
     try:
         result = subprocess.run(
             [
@@ -138,14 +162,231 @@ def _access_token() -> str:
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
         msg = "Could not read the Keychain to load Google credentials"
         raise GoogleAuthError(msg) from exc
-    token = result.stdout.strip()
-    if result.returncode != 0 or not token:
+    raw = result.stdout.strip()
+    if result.returncode != 0 or not raw:
         msg = (
             "Google is not connected. Authorize it from Connectors "
             "(Settings -> Connectors -> Google) and try again."
         )
         raise GoogleAuthError(msg)
-    return token
+    return raw
+
+
+def _keychain_write(value: str) -> None:
+    """Persist a refreshed credential back to the Keychain.
+
+    Best-effort: the in-memory token still works for this run even if
+    the write fails; the next run just refreshes again.
+
+    sensitivity_tier: 3 (writes credential material)
+    """
+    try:
+        subprocess.run(
+            [
+                "security",
+                "add-generic-password",
+                "-U",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                "arandu",
+                "-w",
+                value,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+
+def _load_credential() -> _Credential:
+    """Load the stored Google credential.
+
+    Env var first so tests and CI never touch the Keychain (and never
+    need a real Google account); otherwise parse the Keychain entry —
+    JSON credential from the PKCE exchange, or a legacy bare token.
+
+    sensitivity_tier: 3
+    """
+    env_token = os.environ.get(TOKEN_ENV_VAR, "").strip()
+    if env_token:
+        return _Credential(access_token=env_token, from_env=True)
+    raw = _keychain_read()
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            return _Credential(
+                access_token=str(data.get("access_token") or ""),
+                refresh_token=str(data.get("refresh_token") or ""),
+                expires_at=str(data.get("expires_at") or ""),
+                token_url=str(data.get("token_url") or ""),
+                client_id=str(data.get("client_id") or ""),
+                client_secret=str(data.get("client_secret") or ""),
+            )
+    return _Credential(access_token=raw)
+
+
+def _expired(credential: _Credential) -> bool:
+    """Whether the access token is at (or within 60s of) expiry.
+
+    Unknown/unparseable expiry reads as "not expired" — the 401 retry
+    path catches those.
+
+    sensitivity_tier: 1
+    """
+    if not credential.expires_at:
+        return False
+    try:
+        expires = datetime.fromisoformat(
+            credential.expires_at.replace("Z", "+00:00"),
+        )
+    except ValueError:
+        return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    now = datetime.now(tz=timezone.utc)
+    return now >= expires - timedelta(seconds=60)
+
+
+def _refresh_credential(credential: _Credential) -> _Credential:
+    """Trade the refresh token for a fresh access token and persist it.
+
+    sensitivity_tier: 3
+    """
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": credential.refresh_token,
+    }
+    if credential.client_id:
+        data["client_id"] = credential.client_id
+    if credential.client_secret:
+        data["client_secret"] = credential.client_secret
+    payload = _post_form(credential.token_url, data)
+    token = str(payload.get("access_token") or "")
+    if not token:
+        msg = (
+            "Google token refresh returned no access token. "
+            "Re-authorize Google in Connectors."
+        )
+        raise GoogleAuthError(msg)
+    expires_at = ""
+    expires_in = payload.get("expires_in")
+    if expires_in is not None:
+        try:
+            expires_at = (
+                datetime.now(tz=timezone.utc)
+                + timedelta(seconds=int(expires_in))
+            ).isoformat()
+        except (TypeError, ValueError):
+            expires_at = ""
+    refreshed = replace(
+        credential,
+        access_token=token,
+        # Providers may rotate the refresh token on use; keep the old
+        # one when they don't.
+        refresh_token=str(
+            payload.get("refresh_token") or credential.refresh_token,
+        ),
+        expires_at=expires_at,
+    )
+    stored = {
+        "access_token": refreshed.access_token,
+        "refresh_token": refreshed.refresh_token,
+        "token_url": refreshed.token_url,
+    }
+    if refreshed.expires_at:
+        stored["expires_at"] = refreshed.expires_at
+    if refreshed.client_id:
+        stored["client_id"] = refreshed.client_id
+    if refreshed.client_secret:
+        stored["client_secret"] = refreshed.client_secret
+    _keychain_write(json.dumps(stored))
+    return refreshed
+
+
+def _post_form(url: str, data: dict[str, str]) -> dict[str, Any]:
+    """POST a urlencoded form to the token endpoint, decode JSON.
+
+    Failures surface as `GoogleAuthError` — every caller is on an auth
+    path where "re-authorize" is the actionable outcome.
+
+    sensitivity_tier: 3 (carries tokens)
+    """
+    body = urllib.parse.urlencode(data).encode("ascii")
+    request = urllib.request.Request(  # noqa: S310 - operator-set URL
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=HTTP_TIMEOUT_SECONDS,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        msg = (
+            f"Google token refresh was rejected (HTTP {exc.code}). "
+            "Re-authorize Google in Connectors."
+        )
+        raise GoogleAuthError(msg) from exc
+    except urllib.error.URLError as exc:
+        msg = f"Could not reach the Google token endpoint: {exc.reason}"
+        raise GoogleAuthError(msg) from exc
+    except (OSError, ValueError) as exc:
+        msg = f"Google token refresh failed: {exc}"
+        raise GoogleAuthError(msg) from exc
+    if not isinstance(payload, dict):
+        msg = "Google token endpoint response was not a JSON object"
+        raise GoogleAuthError(msg)
+    return payload
+
+
+def _access_token() -> str:
+    """Return a usable Google access token, refreshing if expired.
+
+    sensitivity_tier: 3 (returns a bearer token)
+    """
+    credential = _load_credential()
+    if _expired(credential) and credential.refreshable:
+        credential = _refresh_credential(credential)
+    if not credential.access_token:
+        msg = (
+            "Google is not connected. Authorize it from Connectors "
+            "(Settings -> Connectors -> Google) and try again."
+        )
+        raise GoogleAuthError(msg)
+    return credential.access_token
+
+
+def _try_refresh() -> bool:
+    """Refresh the stored credential after a mid-call auth failure.
+
+    Returns True when a refresh happened (so the caller may retry
+    once); False when the credential can't refresh itself — env-token,
+    legacy bare-token, or a refresh the provider rejected.
+
+    sensitivity_tier: 2
+    """
+    try:
+        credential = _load_credential()
+    except GoogleAuthError:
+        return False
+    if not credential.refreshable:
+        return False
+    try:
+        _refresh_credential(credential)
+    except GoogleAuthError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -549,12 +790,23 @@ def _handle_tool_call(
     tool_name: str,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    if tool_name == "list_calendar_events":
-        rows = list_calendar_events(arguments)
-    elif tool_name == "list_emails":
-        rows = list_emails(arguments)
-    else:
+    handlers = {
+        "list_calendar_events": list_calendar_events,
+        "list_emails": list_emails,
+    }
+    handler = handlers.get(tool_name)
+    if handler is None:
         return _tool_error_result(f"Unknown tool: {tool_name}")
+    try:
+        rows = handler(arguments)
+    except GoogleAuthError:
+        # A 401/403 mid-call usually means the access token expired
+        # between the proactive check and the request. If the stored
+        # credential can refresh itself, do it once and retry;
+        # otherwise let the re-authorize message surface.
+        if not _try_refresh():
+            raise
+        rows = handler(arguments)
     return {"content": [{"type": "json", "json": rows}], "isError": False}
 
 

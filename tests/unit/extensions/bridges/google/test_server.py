@@ -15,6 +15,7 @@ sensitivity_tier: 1 (synthetic fixtures only)
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -337,6 +338,128 @@ def test_gmail_from_date_becomes_gmail_query(
 
     _, params = calls[0]
     assert params["q"] == "after:2026/07/01"
+
+
+# ------------------------------------------------------------------- auth
+
+
+def test_legacy_bare_token_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-exchange installs hold a bare token — must keep working."""
+    monkeypatch.delenv(server.TOKEN_ENV_VAR, raising=False)
+    monkeypatch.setattr(server, "_keychain_read", lambda: "legacy-token")
+
+    assert server._access_token() == "legacy-token"
+
+
+def test_expired_json_credential_refreshes_and_persists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired access token refreshes proactively and is written back.
+
+    Google access tokens live ~1h; without this the hourly Gmail sync
+    would 401 on every cycle after the first.
+    """
+    monkeypatch.delenv(server.TOKEN_ENV_VAR, raising=False)
+    stored = {
+        "access_token": "old-token",
+        "refresh_token": "rt-1",
+        "expires_at": "2020-01-01T00:00:00+00:00",
+        "token_url": "https://oauth2.example/token",
+        "client_id": "cid-1",
+    }
+    monkeypatch.setattr(
+        server, "_keychain_read", lambda: json.dumps(stored),
+    )
+    writes: list[str] = []
+    monkeypatch.setattr(server, "_keychain_write", writes.append)
+    posts: list[tuple[str, dict[str, str]]] = []
+
+    def _fake_post(url: str, data: dict[str, str]) -> dict[str, Any]:
+        posts.append((url, data))
+        return {"access_token": "new-token", "expires_in": 3600}
+
+    monkeypatch.setattr(server, "_post_form", _fake_post)
+
+    assert server._access_token() == "new-token"
+
+    url, data = posts[0]
+    assert url == stored["token_url"]
+    assert data["grant_type"] == "refresh_token"
+    assert data["refresh_token"] == "rt-1"
+    assert data["client_id"] == "cid-1"
+
+    persisted = json.loads(writes[0])
+    assert persisted["access_token"] == "new-token"
+    # Google usually omits the refresh token on refresh — keep the old.
+    assert persisted["refresh_token"] == "rt-1"
+    assert persisted["token_url"] == stored["token_url"]
+
+
+def test_auth_failure_mid_call_refreshes_once_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 mid-call refreshes the credential and retries the tool.
+
+    Covers the token expiring between the proactive expiry check and
+    the request (or an install whose credential has no expiry stamp).
+    """
+    monkeypatch.delenv(server.TOKEN_ENV_VAR, raising=False)
+    box = {
+        "raw": json.dumps({
+            "access_token": "old-token",
+            "refresh_token": "rt-1",
+            "token_url": "https://oauth2.example/token",
+        }),
+    }
+    monkeypatch.setattr(server, "_keychain_read", lambda: box["raw"])
+    monkeypatch.setattr(
+        server, "_keychain_write", lambda v: box.update(raw=v),
+    )
+    monkeypatch.setattr(
+        server,
+        "_post_form",
+        lambda url, data: {"access_token": "new-token"},
+    )
+
+    tokens_seen: list[str] = []
+
+    def _fake_api(
+        path: str, params: dict[str, Any], token: str,
+    ) -> dict[str, Any]:
+        tokens_seen.append(token)
+        if token == "old-token":
+            msg = "Google rejected the stored credential (HTTP 401)."
+            raise server.GoogleAuthError(msg)
+        return {"messages": []}
+
+    monkeypatch.setattr(server, "_api_get", _fake_api)
+
+    result = server._handle_tool_call("list_emails", {})
+
+    assert result["isError"] is False
+    assert tokens_seen[0] == "old-token"
+    assert tokens_seen[-1] == "new-token"
+
+
+def test_unrefreshable_credential_surfaces_reauthorize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy bare tokens can't refresh — the 401 must surface as-is."""
+    monkeypatch.delenv(server.TOKEN_ENV_VAR, raising=False)
+    monkeypatch.setattr(server, "_keychain_read", lambda: "legacy-token")
+
+    def _fake_api(
+        path: str, params: dict[str, Any], token: str,
+    ) -> dict[str, Any]:
+        msg = "Google rejected the stored credential (HTTP 401)."
+        raise server.GoogleAuthError(msg)
+
+    monkeypatch.setattr(server, "_api_get", _fake_api)
+
+    with pytest.raises(server.GoogleAuthError, match="401"):
+        server._handle_tool_call("list_emails", {})
 
 
 # ------------------------------------------------------------------- misc

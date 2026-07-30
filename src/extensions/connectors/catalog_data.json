@@ -1026,9 +1026,7 @@
       "requires_env": {},
       "requires_app": null,
       "platforms": [
-        "macos",
-        "linux",
-        "windows"
+        "macos"
       ],
       "min_version": null,
       "default_enabled": false,
@@ -1129,9 +1127,7 @@
       "requires_env": {},
       "requires_app": null,
       "platforms": [
-        "macos",
-        "linux",
-        "windows"
+        "macos"
       ],
       "min_version": null,
       "default_enabled": false,

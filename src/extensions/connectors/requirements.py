@@ -8,16 +8,21 @@ sensitivity_tier: 1 (checks system state, no user data accessed)
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import secrets
 import subprocess
 import threading
+import urllib.error
 import urllib.parse
+import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -448,8 +453,24 @@ class RequirementChecker:
 
         Provider configuration is expected in environment variables:
         - `ARANDU_OAUTH_<PROVIDER>_AUTH_URL` (required)
+        - `ARANDU_OAUTH_<PROVIDER>_TOKEN_URL` (required for real
+          authorization-code providers): enables the PKCE code->token
+          exchange. Without it, the loopback callback can only succeed
+          when the provider hands a token directly in query parameters
+          — an authorization code on its own is *not* a credential, and
+          storing one produces a connector that fails on every call.
+        - `ARANDU_OAUTH_<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET`
+          (optional): sent on the exchange. Native-app client secrets
+          (e.g. Google "Desktop app" clients) are not treated as
+          confidential by the provider, but still come from the
+          operator's environment — never from the repo.
         - `ARANDU_OAUTH_<PROVIDER>_AUTH_PARAMS` (optional JSON map)
         - `ARANDU_OAUTH_<PROVIDER>_TEST_TOKEN` (optional shortcut for tests)
+
+        When the exchange runs, the Keychain entry holds a JSON
+        credential (access token, refresh token, expiry, token URL,
+        client id/secret) so bridges can refresh expired access tokens
+        themselves; otherwise it holds the bare token, as before.
 
         sensitivity_tier: 2
         """
@@ -458,6 +479,9 @@ class RequirementChecker:
         auth_url_key = f"ARANDU_OAUTH_{provider_key}_AUTH_URL"
         auth_params_key = f"ARANDU_OAUTH_{provider_key}_AUTH_PARAMS"
         test_token_key = f"ARANDU_OAUTH_{provider_key}_TEST_TOKEN"
+        token_url_key = f"ARANDU_OAUTH_{provider_key}_TOKEN_URL"
+        client_id_key = f"ARANDU_OAUTH_{provider_key}_CLIENT_ID"
+        client_secret_key = f"ARANDU_OAUTH_{provider_key}_CLIENT_SECRET"
 
         test_token = os.environ.get(test_token_key, "").strip()
         if test_token:
@@ -476,6 +500,10 @@ class RequirementChecker:
                 provider=provider,
                 error=f"OAuth provider '{provider}' is not configured",
             )
+
+        token_url = os.environ.get(token_url_key, "").strip()
+        client_id = os.environ.get(client_id_key, "").strip()
+        client_secret = os.environ.get(client_secret_key, "").strip()
 
         callback_state = _OAuthCallbackState(event=threading.Event())
         server = HTTPServer(("127.0.0.1", 0), _OAuthCallbackHandler)
@@ -498,6 +526,23 @@ class RequirementChecker:
             "state": state_token,
             "response_type": "code",
         }
+        if client_id:
+            params["client_id"] = client_id
+        # PKCE (RFC 7636) whenever a token endpoint is configured: lets
+        # native apps do the code exchange without a confidential
+        # client secret, and binds the code to this flow instance.
+        code_verifier = ""
+        if token_url:
+            code_verifier = secrets.token_urlsafe(64)
+            challenge = (
+                base64.urlsafe_b64encode(
+                    hashlib.sha256(code_verifier.encode("ascii")).digest(),
+                )
+                .rstrip(b"=")
+                .decode("ascii")
+            )
+            params["code_challenge"] = challenge
+            params["code_challenge_method"] = "S256"
         params.update(self._load_auth_params(auth_params_key))
         oauth_url = self._append_query_params(auth_url, params)
 
@@ -544,12 +589,48 @@ class RequirementChecker:
                 error=payload.get("error_description", payload["error"]),
             )
 
-        token = (
-            payload.get("access_token")
-            or payload.get("token")
-            or payload.get("code")
-        )
+        code = payload.get("code", "")
+        if token_url and code:
+            exchanged = self._exchange_code_for_tokens(
+                token_url=token_url,
+                code=code,
+                redirect_uri=redirect_uri,
+                code_verifier=code_verifier,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+            error = exchanged.get("error")
+            if error:
+                return OAuthResult(
+                    success=False,
+                    provider=provider,
+                    error=str(error),
+                )
+            credential = json.dumps(exchanged["credential"])
+            if not self.store_oauth_token(provider, credential):
+                return OAuthResult(
+                    success=False,
+                    provider=provider,
+                    error="Failed to store OAuth credential in Keychain",
+                )
+            return OAuthResult(success=True, provider=provider)
+
+        token = payload.get("access_token") or payload.get("token")
         if not token:
+            if code:
+                # Storing the bare authorization code used to "succeed"
+                # here — and then every API call failed with 401,
+                # because a code is not a credential. Fail loudly with
+                # the missing piece instead.
+                return OAuthResult(
+                    success=False,
+                    provider=provider,
+                    error=(
+                        "OAuth returned an authorization code but "
+                        f"{token_url_key} is not set, so it cannot be "
+                        "exchanged for an access token"
+                    ),
+                )
             return OAuthResult(
                 success=False,
                 provider=provider,
@@ -567,6 +648,95 @@ class RequirementChecker:
             success=True,
             provider=provider,
         )
+
+    def _exchange_code_for_tokens(
+        self,
+        *,
+        token_url: str,
+        code: str,
+        redirect_uri: str,
+        code_verifier: str,
+        client_id: str,
+        client_secret: str,
+    ) -> dict[str, Any]:
+        """Exchange an authorization code for tokens (RFC 6749 §4.1.3).
+
+        Returns ``{"credential": {...}}`` on success or
+        ``{"error": str}`` on failure. The credential dict carries
+        everything a bridge needs to refresh the access token later.
+
+        sensitivity_tier: 2 (handles tokens)
+        """
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        }
+        if client_id:
+            data["client_id"] = client_id
+        if client_secret:
+            data["client_secret"] = client_secret
+        try:
+            payload = self._post_form(token_url, data)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            with contextlib.suppress(Exception):
+                detail = exc.read().decode("utf-8", errors="replace")[:200]
+            return {
+                "error": (
+                    f"Token exchange failed (HTTP {exc.code}): {detail}"
+                ),
+            }
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return {"error": f"Token exchange failed: {exc}"}
+
+        access_token = str(payload.get("access_token") or "")
+        if not access_token:
+            return {"error": "Token endpoint returned no access_token"}
+
+        credential: dict[str, Any] = {
+            "access_token": access_token,
+            "token_url": token_url,
+        }
+        if payload.get("refresh_token"):
+            credential["refresh_token"] = str(payload["refresh_token"])
+        expires_in = payload.get("expires_in")
+        if expires_in is not None:
+            with contextlib.suppress(TypeError, ValueError):
+                credential["expires_at"] = (
+                    datetime.now(tz=timezone.utc)
+                    + timedelta(seconds=int(expires_in))
+                ).isoformat()
+        if client_id:
+            credential["client_id"] = client_id
+        if client_secret:
+            credential["client_secret"] = client_secret
+        return {"credential": credential}
+
+    @staticmethod
+    def _post_form(url: str, data: dict[str, str]) -> dict[str, Any]:
+        """POST a urlencoded form and decode the JSON response.
+
+        sensitivity_tier: 2 (carries tokens)
+        """
+        body = urllib.parse.urlencode(data).encode("ascii")
+        request = urllib.request.Request(  # noqa: S310 - operator-set URL
+            url,
+            data=body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=30,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            msg = "Token endpoint response was not a JSON object"
+            raise ValueError(msg)
+        return payload
 
     @staticmethod
     def _oauth_service_name(provider: str) -> str:
