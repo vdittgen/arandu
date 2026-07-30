@@ -462,6 +462,33 @@ class ProactiveIntelligence:
         except Exception:  # noqa: BLE001
             logger.debug("Could not store fingerprint", exc_info=True)
 
+    def _mark_evaluated(self) -> None:
+        """Record that a cycle just completed successfully.
+
+        Tracked separately from the fingerprint on purpose. The
+        fingerprint's ``updated_at`` only moves when the *data* changed,
+        so on an idle-but-healthy machine every tick short-circuits on
+        the unchanged-fingerprint check and that timestamp never
+        advances — which would make the Dashboard's freshness indicator
+        cry starvation simply because no new mail arrived. A freshness
+        signal that false-alarms is worse than none: it trains the user
+        to ignore the one indicator meant to reveal real starvation.
+
+        "Successfully" excludes a cycle where a pillar failed — that
+        one really did produce nothing, and should read as stale.
+
+        sensitivity_tier: 1
+        """
+        try:
+            self._db.execute(
+                "INSERT OR REPLACE INTO _proactive_state "
+                "(key, value, updated_at) "
+                "VALUES ('last_evaluated_at', ?, ?)",
+                [utc_now_iso(), utc_now_iso()],
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not store last_evaluated_at", exc_info=True)
+
     # ----------------------------------------------------------
     # Main entry
     # ----------------------------------------------------------
@@ -487,6 +514,10 @@ class ProactiveIntelligence:
             logger.info(
                 "Proactive eval skipped — data unchanged (fp=%s)", current_fp,
             )
+            # The loop *did* run to completion; there was simply nothing
+            # new to evaluate. Record it so freshness reflects "the loop
+            # is alive", not "the data changed recently".
+            self._mark_evaluated()
             return self._load_cached_result()
 
         # Clean stale entries first
@@ -545,6 +576,7 @@ class ProactiveIntelligence:
             )
         else:
             self._store_fingerprint(current_fp)
+            self._mark_evaluated()
 
         return ProactiveResult(
             pending_replies=replies,
@@ -2163,23 +2195,37 @@ class ProactiveIntelligence:
     def get_status(self) -> dict[str, Any]:
         """Freshness snapshot of the proactive loop, for the Dashboard.
 
-        ``last_evaluated_at`` is the ``updated_at`` of the stored data
-        fingerprint — written only when a full evaluation cycle
-        completes without a failed pillar, so it is the timestamp of
-        the last *fully successful* eval. ``None`` means no cycle has
+        ``last_evaluated_at`` is when a cycle last completed without a
+        failed pillar — including a cycle that short-circuited because
+        the data was unchanged, which is a successful "nothing to do"
+        outcome rather than a missed one. ``None`` means no cycle has
         ever completed (fresh install, or every cycle so far failed) —
         the UI flags that as stale so silent starvation is visible.
+
+        Deliberately *not* the fingerprint row's ``updated_at``: that
+        only moves when the data changed, so it reads as stale on an
+        idle-but-healthy machine. See :meth:`_mark_evaluated`.
 
         sensitivity_tier: 1
         """
         last_evaluated_at: str | None = None
         try:
             rows = self._db.query(
-                "SELECT updated_at FROM _proactive_state "
-                "WHERE key = 'fingerprint'"
+                "SELECT value FROM _proactive_state "
+                "WHERE key = 'last_evaluated_at'"
             )
             if rows:
-                last_evaluated_at = str(rows[0]["updated_at"]) or None
+                last_evaluated_at = str(rows[0]["value"]) or None
+            else:
+                # Installs upgrading mid-cycle have a fingerprint but no
+                # marker yet. Its updated_at understates freshness, but
+                # it beats reporting "never evaluated" on a working loop.
+                rows = self._db.query(
+                    "SELECT updated_at FROM _proactive_state "
+                    "WHERE key = 'fingerprint'"
+                )
+                if rows:
+                    last_evaluated_at = str(rows[0]["updated_at"]) or None
         except Exception:  # noqa: BLE001
             logger.debug("proactive status read failed", exc_info=True)
 

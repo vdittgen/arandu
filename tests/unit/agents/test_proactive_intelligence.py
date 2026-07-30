@@ -797,9 +797,67 @@ class TestLLMEvaluation:
         assert status["last_evaluated_at"] is None
         assert status["pending_replies"] == 0
 
-        proactive._store_fingerprint("fp-1")
+        proactive._mark_evaluated()
         status = proactive.get_status()
         assert status["last_evaluated_at"] is not None
+
+    def test_get_status_falls_back_to_fingerprint_on_upgrade(
+        self,
+        proactive: ProactiveIntelligence,
+    ) -> None:
+        """An install with a fingerprint but no marker isn't "never run"."""
+        proactive._store_fingerprint("fp-1")
+        assert proactive.get_status()["last_evaluated_at"] is not None
+
+    def test_unchanged_data_still_refreshes_freshness(
+        self,
+        proactive: ProactiveIntelligence,
+    ) -> None:
+        """An idle-but-healthy loop must not read as starved.
+
+        ``evaluate_all`` short-circuits when the data fingerprint is
+        unchanged, so sourcing freshness from that row's ``updated_at``
+        froze the timestamp whenever no new mail arrived — flagging the
+        dashboard amber on a loop that was running perfectly. A
+        freshness signal that false-alarms trains the user to ignore the
+        one indicator meant to reveal real starvation.
+        """
+        stale = "2020-01-01T00:00:00+00:00"
+        proactive._store_fingerprint(proactive._compute_data_fingerprint())
+        proactive._db.execute(
+            "UPDATE _proactive_state SET updated_at = ? "
+            "WHERE key = 'fingerprint'",
+            [stale],
+        )
+        assert proactive.get_status()["last_evaluated_at"] == stale
+
+        # Data is unchanged, so this cycle short-circuits — but it did
+        # run to completion, and freshness must say so.
+        proactive.evaluate_all()
+
+        refreshed = proactive.get_status()["last_evaluated_at"]
+        assert refreshed is not None
+        assert refreshed != stale
+
+    def test_failed_pillar_leaves_freshness_stale(
+        self,
+        proactive: ProactiveIntelligence,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A cycle that failed really did produce nothing — flag it.
+
+        The counterpart to the test above: freshness must not be so
+        eager that it hides genuine starvation.
+        """
+        _seed_messages(proactive._db)
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("provider down")
+
+        monkeypatch.setattr(proactive, "_llm_evaluate_messages", _boom)
+        proactive.evaluate_all()
+
+        assert proactive.get_status()["last_evaluated_at"] is None
 
 
 # ================================================================
