@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use keep_awake::CaffeinateHandle;
 use ollama_supervisor::OllamaSupervisor;
@@ -573,7 +573,17 @@ pub fn run() {
                             match commands::bridge::call_python_cli_with_timeout(
                                 &["evaluate-proactive"], &state.project_root, 900,
                             ).await {
-                                Ok(_) => eprintln!("[lib] proactive eval completed"),
+                                Ok(_) => {
+                                    eprintln!("[lib] proactive eval completed");
+                                    // The background loop bypasses the `evaluate_proactive`
+                                    // command, so it must emit the refresh event itself —
+                                    // otherwise the AmbientBar freshness indicator (and the
+                                    // LifeBoard panels behind Layout's re-broadcast) never
+                                    // learn a background cycle completed.
+                                    if let Err(e) = handle6.emit("arandu:proactive-refreshed", ()) {
+                                        eprintln!("[lib] failed to emit proactive-refreshed: {e}");
+                                    }
+                                }
                                 Err(e) => eprintln!("[lib] proactive eval failed: {e}"),
                             }
                             commands::unregister_task(&state, "proactive-eval").await;

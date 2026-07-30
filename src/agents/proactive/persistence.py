@@ -944,10 +944,14 @@ class ProactiveIntelligence:
                 # Fall back to the same count-based selection used when
                 # no topics exist at all, and log it so the bypass is
                 # visible instead of an indistinguishable empty result.
+                # This also fires on a warm mart whose topic contacts
+                # genuinely overlap none of the unanswered senders;
+                # evaluating a few extra senders there is preferable to
+                # silently starving the cold-start case.
                 logger.info(
                     "Proactive eval: topic filter matched none of %d "
-                    "senders — cold/stale mart, falling back to "
-                    "count-based selection",
+                    "senders — falling back to count-based selection "
+                    "(cold mart, or no topic-contact overlap)",
                     len(by_sender),
                 )
                 prioritized = self._senders_by_message_count(by_sender)

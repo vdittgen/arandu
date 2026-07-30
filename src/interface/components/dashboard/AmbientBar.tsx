@@ -93,6 +93,16 @@ function AmbientBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Slow clock tick so the age label and staleness flag stay truthful
+  // while the dashboard sits open. In the starved case no refresh event
+  // arrives to trigger a re-render — without a tick the indicator could
+  // never flip amber, hiding the very state it exists to reveal.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const dbHealthy = stats.data?.healthy ?? true;
   const totalRecords = stats.data
     ? stats.data.total_sqlite_rows +
@@ -103,7 +113,7 @@ function AmbientBar() {
   const lastEval = proactive.data?.last_evaluated_at ?? null;
   const evalStale =
     lastEval === null ||
-    Date.now() - new Date(lastEval).getTime() > STALE_AFTER_MS;
+    now - new Date(lastEval).getTime() > STALE_AFTER_MS;
   const evalLabel =
     lastEval === null ? "eval: never" : `eval ${formatAge(lastEval)}`;
 
