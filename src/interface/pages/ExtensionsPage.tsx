@@ -33,6 +33,7 @@ import {
   Code2,
   Globe,
   CreditCard,
+  Plus,
   type LucideIcon,
 } from "lucide-react";
 import { Skeleton, SkeletonSection, SkeletonTable } from "../components/LoadingState";
@@ -1445,7 +1446,16 @@ const DISCOVER_CATEGORIES: readonly DiscoverCategory[] = [
 ];
 
 interface DiscoverInstallTarget {
-  readonly command: string;
+  /**
+   * Preset command to pre-fill and auto-discover. Omitted for the
+   * free-form path, where the modal opens with an empty, editable
+   * command field — the "paste any MCP command" flow. The modal always
+   * supported this (`initialCommand` is optional, and gates only the
+   * auto-discover), but nothing ever opened it that way, so the
+   * advertised escape hatch had no entry point at all once the orphaned
+   * DataSourcesPage was removed.
+   */
+  readonly command?: string;
   readonly requiresEnv?: ReadonlyArray<EnvRequirement>;
 }
 
@@ -1486,8 +1496,10 @@ function DiscoverConnectorCard({
 
 function DiscoverTab({
   onInstall,
+  onAddCustom,
 }: {
   readonly onInstall: (target: DiscoverInstallTarget) => void;
+  readonly onAddCustom: () => void;
 }) {
   const [search, setSearch] = useState("");
 
@@ -1525,6 +1537,13 @@ function DiscoverTab({
             </button>
           )}
         </div>
+        <button
+          onClick={onAddCustom}
+          className="flex shrink-0 items-center gap-1.5 rounded-2 border border-hairline px-3 py-2 text-xs font-medium text-ink transition-colors hover:border-indigo/40 hover:bg-surface"
+        >
+          <Plus className="h-3.5 w-3.5" strokeWidth={1.6} />
+          Add custom
+        </button>
         <a
           href="https://mcp.so"
           target="_blank"
@@ -1562,10 +1581,22 @@ function DiscoverTab({
 
       <div className="rounded-2 border border-dashed border-hairline bg-surface/30 p-4">
         <p className="text-xs text-muted">
-          Don't see what you need? Any MCP-compatible server works — paste its command in the Install modal.
-          Servers that need an interactive OAuth browser flow on first run (Gmail, Google Drive) aren't listed
-          here because the install discovery times out waiting for the browser dance — set those up via their
-          CLI first, then paste the command.
+          Don&rsquo;t see what you need? Any MCP-compatible server works —{" "}
+          <button
+            onClick={onAddCustom}
+            className="font-medium text-indigo-2 underline decoration-dotted underline-offset-2 hover:text-indigo"
+          >
+            add a custom connector
+          </button>{" "}
+          and paste its command. Arandu probes the server, infers a schema from
+          a sample of its output, and shows you the mapping before anything is
+          stored.
+        </p>
+        <p className="mt-2 text-[10px] text-muted">
+          Google Calendar and Gmail are available as native connectors above —
+          no MCP server needed. Third-party servers that run an interactive
+          OAuth browser flow on first launch may time out during discovery; run
+          them once via their own CLI to cache credentials, then add them here.
         </p>
       </div>
     </div>
@@ -1600,6 +1631,12 @@ function ConnectorsPage() {
     [],
   );
 
+  // Free-form path: open the same modal with no preset, so the command
+  // field starts empty and editable and nothing auto-discovers.
+  const handleAddCustom = useCallback(() => {
+    setInstallTarget({});
+  }, []);
+
   return (
     <div className="flex-1 space-y-6 overflow-y-auto p-6">
       {/* Header */}
@@ -1633,7 +1670,10 @@ function ConnectorsPage() {
         <ConnectorsTab onOpenConfig={(id) => setConfigConnectorId(id)} />
       )}
       {activeTab === "discover" && (
-        <DiscoverTab onInstall={handleDiscoverInstall} />
+        <DiscoverTab
+          onInstall={handleDiscoverInstall}
+          onAddCustom={handleAddCustom}
+        />
       )}
 
       {/* Modals */}
