@@ -2266,6 +2266,27 @@ pub async fn get_pending_replies(
     })
 }
 
+/// Get proactive loop freshness (last successful evaluation + counts).
+///
+/// Powers the Dashboard's starvation indicator — without it a skipped
+/// or failing proactive loop is indistinguishable from "nothing to
+/// report".
+///
+/// # sensitivity_tier: 1
+#[tauri::command]
+pub async fn get_proactive_status(
+    state: State<'_, AppState>,
+) -> Result<types::ProactiveStatus, String> {
+    let output = call_python_cli(
+        &["proactive-status"],
+        &state.project_root,
+    )
+    .await?;
+    serde_json::from_str(&output).map_err(|e| {
+        format!("Failed to parse proactive status: {e}")
+    })
+}
+
 /// Get contact contexts (important people with ongoing situations).
 ///
 /// # sensitivity_tier: 3

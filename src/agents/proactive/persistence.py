@@ -904,13 +904,24 @@ class ProactiveIntelligence:
         # Topic-driven sender selection: keep only senders with topics
         if tc:
             prioritized = self._prioritize_senders(by_sender, tc)
+            if not prioritized and by_sender:
+                # Cold-start bypass: when the topic mart is cold/stale
+                # (fresh install, pipeline hasn't caught up), the topic
+                # filter can match zero senders even with unanswered
+                # messages waiting — silently starving pending replies.
+                # Fall back to the same count-based selection used when
+                # no topics exist at all, and log it so the bypass is
+                # visible instead of an indistinguishable empty result.
+                logger.info(
+                    "Proactive eval: topic filter matched none of %d "
+                    "senders — cold/stale mart, falling back to "
+                    "count-based selection",
+                    len(by_sender),
+                )
+                prioritized = self._senders_by_message_count(by_sender)
         else:
             # Cold start: no topics yet, pick top senders by msg count
-            prioritized = sorted(
-                by_sender.keys(),
-                key=lambda s: len(by_sender[s]),
-                reverse=True,
-            )[:self._MAX_SENDERS]
+            prioritized = self._senders_by_message_count(by_sender)
 
         logger.info(
             "Proactive eval: %d/%d senders selected (topic-driven=%s)",
@@ -1031,6 +1042,20 @@ class ProactiveIntelligence:
                 )
 
         return all_results
+
+    @staticmethod
+    def _senders_by_message_count(
+        by_sender: dict[str, list[dict[str, Any]]],
+    ) -> list[str]:
+        """Top senders by unanswered message count, capped.
+
+        sensitivity_tier: 1
+        """
+        return sorted(
+            by_sender.keys(),
+            key=lambda s: len(by_sender[s]),
+            reverse=True,
+        )[:ProactiveIntelligence._MAX_SENDERS]
 
     @staticmethod
     def _prioritize_senders(
@@ -2134,6 +2159,57 @@ class ProactiveIntelligence:
     # ----------------------------------------------------------
     # Read-only accessors (for Dashboard — no LLM)
     # ----------------------------------------------------------
+
+    def get_status(self) -> dict[str, Any]:
+        """Freshness snapshot of the proactive loop, for the Dashboard.
+
+        ``last_evaluated_at`` is the ``updated_at`` of the stored data
+        fingerprint — written only when a full evaluation cycle
+        completes without a failed pillar, so it is the timestamp of
+        the last *fully successful* eval. ``None`` means no cycle has
+        ever completed (fresh install, or every cycle so far failed) —
+        the UI flags that as stale so silent starvation is visible.
+
+        sensitivity_tier: 1
+        """
+        last_evaluated_at: str | None = None
+        try:
+            rows = self._db.query(
+                "SELECT updated_at FROM _proactive_state "
+                "WHERE key = 'fingerprint'"
+            )
+            if rows:
+                last_evaluated_at = str(rows[0]["updated_at"]) or None
+        except Exception:  # noqa: BLE001
+            logger.debug("proactive status read failed", exc_info=True)
+
+        counts: dict[str, int] = {
+            "pending_replies": 0,
+            "contact_contexts": 0,
+            "actionable_events": 0,
+        }
+        for table, key in [
+            ("_pending_replies", "pending_replies"),
+            ("_contact_contexts", "contact_contexts"),
+            ("_actionable_events", "actionable_events"),
+        ]:
+            try:
+                dismissed = (
+                    "WHERE dismissed_at IS NULL"
+                    if table != "_contact_contexts"
+                    else ""
+                )
+                rows = self._db.query(
+                    f"SELECT COUNT(*) AS cnt FROM {table} {dismissed}",  # noqa: S608
+                )
+                counts[key] = int(rows[0]["cnt"]) if rows else 0
+            except Exception:  # noqa: BLE001
+                logger.debug("proactive status count failed", exc_info=True)
+
+        return {
+            "last_evaluated_at": last_evaluated_at,
+            **counts,
+        }
 
     def get_pending_replies(self, limit: int = 20) -> list[PendingReply]:
         """Return active (non-dismissed) pending replies.

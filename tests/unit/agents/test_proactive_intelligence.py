@@ -714,6 +714,93 @@ class TestLLMEvaluation:
         replies = proactive.evaluate_pending_replies()
         assert replies == []
 
+    def test_cold_mart_bypass_falls_back_to_message_count(
+        self,
+        proactive: ProactiveIntelligence,
+        tmp_db: DatabaseEngine,
+        stub_pending_reply,
+    ) -> None:
+        """Topic contacts exist but match no sender (cold/stale mart).
+
+        The topic-driven filter must not starve the eval to zero —
+        it falls back to count-based sender selection so a fresh
+        install with unanswered messages still surfaces pending
+        replies on the first eval.
+        """
+        _seed_messages(tmp_db)
+        candidates = proactive._sql_prefilter_messages()
+        assert candidates, "fixture should produce unreplied messages"
+
+        cold_topic_contacts = {
+            "someone unrelated": {
+                "name": "Someone Unrelated",
+                "importance": 9,
+                "topics": [],
+                "messages_7d": 0,
+                "notification_priority": 0,
+                "top_topic": "",
+            },
+        }
+        evaluated = proactive._llm_evaluate_messages(
+            candidates, cold_topic_contacts,
+        )
+        # Without the bypass, _prioritize_senders returns [] and the
+        # agent is never called.
+        assert stub_pending_reply.call_count >= 1
+        # The stub returns no drafts by default, so no results — but
+        # the senders WERE evaluated, which is the starvation fix.
+        assert evaluated == []
+
+    def test_topic_filter_still_narrows_when_mart_is_warm(
+        self,
+        proactive: ProactiveIntelligence,
+        tmp_db: DatabaseEngine,
+        stub_pending_reply,
+    ) -> None:
+        """Warm mart: only topic-matching senders are evaluated."""
+        from src.agents.core.output_types import (
+            PendingReplyBatch,
+            PendingReplyDraft,
+        )
+
+        _seed_messages(tmp_db)
+        stub_pending_reply.return_value = PendingReplyBatch(replies=[
+            PendingReplyDraft(
+                message_id="msg1",
+                needs_reply=True,
+                importance=8,
+                domain="family",
+                reason="x",
+            ),
+        ])
+        warm_topic_contacts = {
+            "father": {
+                "name": "Father",
+                "importance": 9,
+                "topics": [],
+                "messages_7d": 0,
+                "notification_priority": 0,
+                "top_topic": "",
+            },
+        }
+        candidates = proactive._sql_prefilter_messages()
+        proactive._llm_evaluate_messages(candidates, warm_topic_contacts)
+        # Only Father matches — the other sender is filtered out.
+        assert stub_pending_reply.call_count == 1
+
+    def test_get_status_reports_freshness(
+        self,
+        proactive: ProactiveIntelligence,
+    ) -> None:
+        """get_status exposes last-evaluated-at for the dashboard."""
+        status = proactive.get_status()
+        assert status["last_evaluated_at"] is None
+        assert status["pending_replies"] == 0
+
+        proactive._store_fingerprint("fp-1")
+        status = proactive.get_status()
+        assert status["last_evaluated_at"] is not None
+
 
 # ================================================================
 # Test: Birthday detection
