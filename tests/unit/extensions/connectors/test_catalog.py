@@ -56,7 +56,7 @@ def full_db(tmp_db: DatabaseEngine) -> DatabaseEngine:
 class TestCatalogLoading:
     def test_loads_all_connectors(self, catalog: ConnectorCatalog) -> None:
         """Catalog must contain exactly 9 pre-verified connectors."""
-        assert len(catalog.all) == 8
+        assert len(catalog.all) == 10
 
     def test_all_connectors_have_unique_ids(self, catalog: ConnectorCatalog) -> None:
         """Every connector must have a unique ID."""
@@ -84,13 +84,15 @@ class TestCatalogLoading:
     def test_connector_ids_match_expected_set(
         self, catalog: ConnectorCatalog,
     ) -> None:
-        """Verify the exact set of 9 connector IDs."""
+        """Verify the exact set of shipped connector IDs."""
         expected = {
             "apple-calendar",
             "apple-contacts",
             "apple-notes",
             "apple-mail",
             "apple-messages",
+            "google-calendar",
+            "google-gmail",
             "filesystem",
             "whatsapp",
             "spotify",
@@ -110,7 +112,7 @@ class TestCatalogLoading:
 
     def test_categories_are_valid(self, catalog: ConnectorCatalog) -> None:
         """All connectors must use one of the valid categories."""
-        valid = {"apple", "files", "email", "lifestyle"}
+        valid = {"apple", "google", "files", "email", "lifestyle"}
         for c in catalog.all:
             assert c.category in valid, (
                 f"Connector {c.id} has invalid category: {c.category}"
@@ -126,7 +128,7 @@ class TestPlatformFiltering:
     def test_macos_includes_all(self, catalog: ConnectorCatalog) -> None:
         """On macOS, all 9 connectors should be available."""
         available = catalog.get_available(target_platform="macos")
-        assert len(available) == 8
+        assert len(available) == 10
 
     def test_linux_excludes_apple_only(self, catalog: ConnectorCatalog) -> None:
         """On Linux, Apple-only connectors should be excluded."""
@@ -169,7 +171,9 @@ class TestCategoryGrouping:
     ) -> None:
         """get_by_category on macOS should return all 4 categories."""
         grouped = catalog.get_by_category(target_platform="macos")
-        assert set(grouped.keys()) == {"apple", "files", "email", "lifestyle"}
+        assert set(grouped.keys()) == {
+            "apple", "google", "files", "email", "lifestyle",
+        }
 
     def test_apple_category_count(self, catalog: ConnectorCatalog) -> None:
         """Apple category should have 5 connectors."""

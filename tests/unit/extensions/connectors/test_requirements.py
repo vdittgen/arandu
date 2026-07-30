@@ -6,6 +6,10 @@ requirement checking logic without needing actual macOS permissions.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
+import urllib.parse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -447,3 +451,165 @@ class TestOAuthFlow:
         assert result.success is True
         assert result.provider == "google_oauth"
         mock_store.assert_called_once_with("google_oauth", "callback-token")
+
+    def test_oauth_flow_exchanges_code_with_pkce(
+        self, checker: RequirementChecker,
+    ) -> None:
+        """A code callback + token URL must run the PKCE exchange.
+
+        The stored value is a JSON credential (access + refresh token,
+        expiry, token endpoint) rather than the raw code — storing the
+        code used to "succeed" and then 401 on every API call.
+        """
+        state_token = "state-123"
+
+        class FakeHttpServer:
+            def __init__(self, addr, handler) -> None:  # noqa: ANN001
+                self.server_port = 8765
+                self.timeout = 0.5
+
+            def handle_request(self) -> None:
+                state = getattr(self, "callback_state")
+                state.payload = {
+                    "state": state_token,
+                    "code": "auth-code-1",
+                }
+                state.event.set()
+
+            def server_close(self) -> None:
+                return None
+
+        opened_urls: list[str] = []
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "ARANDU_OAUTH_GOOGLE_OAUTH_AUTH_URL": (
+                        "https://example.com/oauth"
+                    ),
+                    "ARANDU_OAUTH_GOOGLE_OAUTH_TOKEN_URL": (
+                        "https://example.com/token"
+                    ),
+                    "ARANDU_OAUTH_GOOGLE_OAUTH_CLIENT_ID": "cid-1",
+                },
+                clear=True,
+            ),
+            patch(
+                "src.extensions.connectors.requirements.HTTPServer",
+                FakeHttpServer,
+            ),
+            patch(
+                "src.extensions.connectors.requirements.secrets.token_urlsafe",
+                return_value=state_token,
+            ),
+            patch(
+                "src.extensions.connectors.requirements.webbrowser.open",
+                side_effect=lambda url: opened_urls.append(url) or True,
+            ),
+            patch.object(
+                RequirementChecker,
+                "_post_form",
+                return_value={
+                    "access_token": "at-1",
+                    "refresh_token": "rt-1",
+                    "expires_in": 3600,
+                },
+            ) as mock_post,
+            patch.object(
+                RequirementChecker,
+                "store_oauth_token",
+                return_value=True,
+            ) as mock_store,
+        ):
+            result = checker.start_oauth_flow("google_oauth")
+
+        assert result.success is True
+
+        # The exchange used the code, the verifier, and the client id.
+        (token_url, data), _ = mock_post.call_args
+        assert token_url == "https://example.com/token"
+        assert data["grant_type"] == "authorization_code"
+        assert data["code"] == "auth-code-1"
+        assert data["code_verifier"] == state_token
+        assert data["client_id"] == "cid-1"
+
+        # The browser URL carried the matching S256 challenge (PKCE).
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(opened_urls[0]).query,
+        )
+        expected_challenge = (
+            base64.urlsafe_b64encode(
+                hashlib.sha256(state_token.encode("ascii")).digest(),
+            )
+            .rstrip(b"=")
+            .decode("ascii")
+        )
+        assert query["code_challenge"] == [expected_challenge]
+        assert query["code_challenge_method"] == ["S256"]
+        assert query["client_id"] == ["cid-1"]
+
+        # The Keychain got a refreshable JSON credential, not the code.
+        (provider, stored), _ = mock_store.call_args
+        assert provider == "google_oauth"
+        credential = json.loads(stored)
+        assert credential["access_token"] == "at-1"
+        assert credential["refresh_token"] == "rt-1"
+        assert credential["token_url"] == "https://example.com/token"
+        assert credential["client_id"] == "cid-1"
+        assert "expires_at" in credential
+
+    def test_oauth_flow_code_without_token_url_fails_loudly(
+        self, checker: RequirementChecker,
+    ) -> None:
+        """An unexchangeable code must not be stored as a credential."""
+        state_token = "state-123"
+
+        class FakeHttpServer:
+            def __init__(self, addr, handler) -> None:  # noqa: ANN001
+                self.server_port = 8765
+                self.timeout = 0.5
+
+            def handle_request(self) -> None:
+                state = getattr(self, "callback_state")
+                state.payload = {
+                    "state": state_token,
+                    "code": "auth-code-1",
+                }
+                state.event.set()
+
+            def server_close(self) -> None:
+                return None
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "ARANDU_OAUTH_GOOGLE_OAUTH_AUTH_URL": (
+                        "https://example.com/oauth"
+                    ),
+                },
+                clear=True,
+            ),
+            patch(
+                "src.extensions.connectors.requirements.HTTPServer",
+                FakeHttpServer,
+            ),
+            patch(
+                "src.extensions.connectors.requirements.secrets.token_urlsafe",
+                return_value=state_token,
+            ),
+            patch(
+                "src.extensions.connectors.requirements.webbrowser.open",
+                return_value=True,
+            ),
+            patch.object(
+                RequirementChecker,
+                "store_oauth_token",
+            ) as mock_store,
+        ):
+            result = checker.start_oauth_flow("google_oauth")
+
+        assert result.success is False
+        assert "TOKEN_URL" in (result.error or "")
+        mock_store.assert_not_called()
