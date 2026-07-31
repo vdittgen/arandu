@@ -197,10 +197,33 @@ def _build_pydantic_ai_model(endpoint: ModelEndpoint) -> Any:
         from pydantic_ai.models.openai import OpenAIModel  # type: ignore
         from pydantic_ai.providers.openai import OpenAIProvider  # type: ignore
     except ImportError as exc:  # pragma: no cover
-        msg = (
-            "pydantic-ai-slim[openai] is not installed; "
-            "agent base classes are unavailable"
-        )
+        # Distinguish "absent" from "present but incompatible". The two
+        # need opposite fixes, and reporting a version mismatch as "not
+        # installed" sends you hunting for a missing package that is
+        # sitting right there. pydantic-ai 2.x renamed ``OpenAIModel``
+        # to ``OpenAIChatModel``, so an unpinned install lands here.
+        import importlib.util
+
+        if importlib.util.find_spec("pydantic_ai") is None:
+            msg = (
+                "pydantic-ai-slim[openai] is not installed; "
+                "agent base classes are unavailable"
+            )
+        else:
+            installed = "unknown"
+            try:
+                from importlib.metadata import version
+
+                installed = version("pydantic-ai-slim")
+            except Exception:  # noqa: BLE001 - best-effort diagnostics
+                pass
+            msg = (
+                "pydantic-ai-slim is installed "
+                f"(version {installed}) but does not expose the API this "
+                "build targets — Arandu requires the 1.x line "
+                "(pydantic-ai-slim>=1.104.0,<2). Reinstall with "
+                "'pip install \"pydantic-ai-slim[openai]>=1.104.0,<2\"'."
+            )
         raise RuntimeError(msg) from exc
 
     from src.models._openai_schema_compat import (
