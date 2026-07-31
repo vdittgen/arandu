@@ -163,3 +163,123 @@ def test_bootstrap_from_graph_registers_distinct_names(
     assert registry.lookup("Berlin") is not None
     # Bootstrap is idempotent — re-running registers no new rows.
     assert registry.bootstrap_from_graph(_StubKuzu()) == 0
+
+
+# ---------------------------------------------------------------------------
+# PERSON precision (#82)
+# ---------------------------------------------------------------------------
+
+
+def test_name_separator_does_not_cross_newlines(
+    registry: RedactionRegistry,
+) -> None:
+    """A name must not absorb the next line.
+
+    `\\s+` between name words merged unrelated entities into one alias:
+    a profile block registered "Marina Silva\\nUser" as a single PERSON,
+    which never recurs verbatim — so the registry accumulated junk and
+    stopped matching "Marina Silva" on its own.
+    """
+    text = "name: Marina Silva\nlocation: Porto Alegre"
+    redacted, mapping = redact_with_registry(text, registry=registry)
+
+    assert "Marina Silva" not in redacted
+    assert "Porto Alegre" not in redacted
+    assert set(mapping.reverse.values()) == {"Marina Silva", "Porto Alegre"}
+    assert rehydrate(redacted, mapping) == text
+
+
+def test_sentence_openers_are_not_people(
+    registry: RedactionRegistry,
+) -> None:
+    """Instruction text must survive redaction unchanged.
+
+    Without this the app's own system prompts came back as
+    "__PERSON_1__ in at most three sentences", and "Answer" / "Never"
+    entered the persistent registry — after which they were rewritten in
+    every later prompt on every path.
+    """
+    text = (
+        "Answer in at most three sentences. Never invent facts. "
+        "Remember to check the calendar first."
+    )
+    redacted, mapping = redact_with_registry(text, registry=registry)
+
+    assert redacted == text
+    assert mapping.reverse == {}
+
+
+def test_opener_is_trimmed_not_swallowed(
+    registry: RedactionRegistry,
+) -> None:
+    """"Call Marina Silva" must redact the name, not the whole phrase.
+
+    The pattern happily matches the verb as the first word of a name.
+    Rejecting such a match would leave a real name exposed; accepting it
+    would register "Call Marina Silva" as the alias, after which the
+    bare name never matches again. So the opener is trimmed off.
+    """
+    redacted, mapping = redact_with_registry(
+        "Call Marina Silva about the review", registry=registry,
+    )
+
+    assert redacted.startswith("Call ")
+    assert "Marina Silva" not in redacted
+    assert list(mapping.reverse.values()) == ["Marina Silva"]
+
+    # ...and the alias is the bare name, so it matches on its own later.
+    again, mapping2 = redact_with_registry(
+        "Marina Silva replied", registry=registry,
+    )
+    assert "Marina Silva" not in again
+    assert list(mapping.reverse) == list(mapping2.reverse)
+
+
+def test_name_opening_a_sentence_is_still_redacted(
+    registry: RedactionRegistry,
+) -> None:
+    """Position alone must never suppress redaction.
+
+    Skipping every sentence-initial capitalised word would silently stop
+    redacting a first name that happens to open a sentence. Over-
+    redaction is a quality problem; this direction is a leak.
+    """
+    redacted, mapping = redact_with_registry(
+        "Marina called me yesterday", registry=registry,
+    )
+
+    assert "Marina" not in redacted
+    assert "Marina" in mapping.reverse.values()
+
+
+def test_surname_after_an_abbreviation_is_still_redacted(
+    registry: RedactionRegistry,
+) -> None:
+    """"Dr. Alvarez" — the abbreviation dot reads as a sentence end.
+
+    Gating the skip on position alone leaked the surname; gating it on a
+    known-opener list keeps it redacted.
+    """
+    redacted, mapping = redact_with_registry(
+        "The therapist is Dr. Alvarez", registry=registry,
+    )
+
+    assert "Alvarez" not in redacted
+    assert "Alvarez" in " ".join(mapping.reverse.values())
+
+
+def test_labelled_value_is_redacted_whole(
+    registry: RedactionRegistry,
+) -> None:
+    """A colon introduces a value, not a new sentence.
+
+    Treating it as a sentence start trimmed "Porto" off the front of
+    "Porto Alegre" and registered half a place name. Labelled values are
+    exactly the shape `build_user_context()` emits.
+    """
+    redacted, mapping = redact_with_registry(
+        "User's location: Porto Alegre", registry=registry,
+    )
+
+    assert "Porto Alegre" in mapping.reverse.values()
+    assert "Porto" not in redacted
