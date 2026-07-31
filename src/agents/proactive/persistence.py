@@ -1767,6 +1767,17 @@ class ProactiveIntelligence:
     def _detect_birthdays(self, now: str) -> list[ActionableEvent]:
         """Detect upcoming birthdays from raw_contacts (pure SQL).
 
+        ``now`` is honoured rather than ignored. The SQL used to call
+        ``date('now')``, which is SQLite's *UTC* clock, while the caller
+        was already threading a timestamp in — so the parameter was
+        accepted and silently discarded, and the window could not be
+        tested without depending on the machine's wall clock.
+
+        Binding it also puts the choice of clock at the call site, which
+        is where it has to be settled: "today" for a personal assistant
+        means the user's day, and every caller currently passes UTC.
+        See the follow-up issue linked from the tests.
+
         sensitivity_tier: 1
         """
         if not table_exists(self._db,"raw_contacts"):
@@ -1780,20 +1791,20 @@ class ProactiveIntelligence:
               AND name IS NOT NULL AND name != ''
               AND (
                 (CAST(strftime('%m', date(birthday)) AS INTEGER)
-                     = CAST(strftime('%m', date('now')) AS INTEGER)
+                     = CAST(strftime('%m', date(?)) AS INTEGER)
                  AND CAST(strftime('%d', date(birthday)) AS INTEGER)
-                     BETWEEN CAST(strftime('%d', date('now')) AS INTEGER)
-                     AND CAST(strftime('%d', date('now')) AS INTEGER) + 3)
+                     BETWEEN CAST(strftime('%d', date(?)) AS INTEGER)
+                     AND CAST(strftime('%d', date(?)) AS INTEGER) + 3)
                 OR (
                   CAST(strftime('%m', date(birthday)) AS INTEGER)
-                      = CAST(strftime('%m', date('now', '+3 days')) AS INTEGER)
+                      = CAST(strftime('%m', date(?, '+3 days')) AS INTEGER)
                   AND CAST(strftime('%d', date(birthday)) AS INTEGER)
-                      <= CAST(strftime('%d', date('now', '+3 days')) AS INTEGER)
-                  AND CAST(strftime('%m', date('now')) AS INTEGER)
-                      != CAST(strftime('%m', date('now', '+3 days')) AS INTEGER)
+                      <= CAST(strftime('%d', date(?, '+3 days')) AS INTEGER)
+                  AND CAST(strftime('%m', date(?) ) AS INTEGER)
+                      != CAST(strftime('%m', date(?, '+3 days')) AS INTEGER)
                 )
               )
-        """)
+        """, [now] * 7)
 
         results: list[ActionableEvent] = []
         for r in rows:

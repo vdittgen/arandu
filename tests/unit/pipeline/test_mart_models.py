@@ -320,11 +320,23 @@ class TestMartToday:
 
     def test_filters_to_current_date(self, pipeline_db: DatabaseEngine) -> None:
         """All rows should have occurred_at on today's date.
-        Fixture data is from 2025, so today's mart should be empty in tests."""
-        import datetime
 
+        Fixture data is from 2025, so today's mart should be empty here.
+
+        "Today" is read from the database rather than from Python. The
+        mart filters on ``DATE('now')`` — SQLite's **UTC** clock —
+        while ``datetime.date.today()`` is the machine's **local** date,
+        so this assertion failed for anyone west of UTC between local
+        and UTC midnight, on code they had not touched. Asking the same
+        engine the mart asks makes the test state the real invariant
+        ("every row falls on the mart's notion of today") and hold in
+        every timezone.
+
+        That the two clocks disagree at all is a product bug rather than
+        just a test bug — tracked separately; see #91.
+        """
         rows = _run_mart(pipeline_db, "mart_today")
-        today_str = datetime.date.today().isoformat()
+        today_str = pipeline_db.query("SELECT DATE('now') AS d")[0]["d"]
         for row in rows:
             # SQLite returns datetime strings; extract just the date part
             assert row["occurred_at"][:10] == today_str

@@ -884,20 +884,54 @@ class TestBirthdayDetection:
                 sensitivity_tier INTEGER DEFAULT 2
             )
         """)
-        # Insert a contact with today's birthday
-        from datetime import datetime
-        today = datetime.now()
-        bday = f"1990-{today.month:02d}-{today.day:02d}"
+        # Fixed clock, and a birthday keyed to it. This used to derive
+        # the birthday from `datetime.now()` (local) while the SQL used
+        # `date('now')` (UTC) and ignored the `now` argument entirely —
+        # so the test failed for anyone west of UTC between local and
+        # UTC midnight, on code they hadn't touched.
+        now = "2026-03-01T00:00:00Z"
         tmp_db.execute(
             "INSERT INTO raw_contacts (id, name, birthday) "
-            f"VALUES ('b1', 'Birthday Person', '{bday}')",
+            "VALUES ('b1', 'Birthday Person', '1990-03-01')",
         )
-        birthdays = proactive._detect_birthdays(
-            "2026-03-01T00:00:00Z",
-        )
+
+        birthdays = proactive._detect_birthdays(now)
+
         assert len(birthdays) >= 1
         assert birthdays[0].event_type == "birthday"
         assert "Birthday Person" in birthdays[0].title
+
+    def test_birthday_window_follows_the_supplied_clock(
+        self,
+        proactive: ProactiveIntelligence,
+        tmp_db: DatabaseEngine,
+    ) -> None:
+        """`now` drives the window — it is not decoration.
+
+        The SQL previously hardcoded `date('now')`, so this argument was
+        accepted and discarded. Anchoring on it is what makes the
+        three-day lookahead testable at all, and it puts the choice of
+        clock at the call site.
+        """
+        tmp_db.execute("""
+            CREATE TABLE IF NOT EXISTS raw_contacts (
+                id VARCHAR PRIMARY KEY,
+                name VARCHAR,
+                phone VARCHAR,
+                email VARCHAR,
+                birthday VARCHAR,
+                sensitivity_tier INTEGER DEFAULT 2
+            )
+        """)
+        tmp_db.execute(
+            "INSERT INTO raw_contacts (id, name, birthday) "
+            "VALUES ('b2', 'June Person', '1990-06-15')",
+        )
+
+        # Two days out: inside the three-day window.
+        assert proactive._detect_birthdays("2026-06-13T12:00:00Z")
+        # Two weeks out: outside it.
+        assert not proactive._detect_birthdays("2026-06-01T12:00:00Z")
 
     def test_no_birthday_no_contacts(
         self,
