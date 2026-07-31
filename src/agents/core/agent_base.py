@@ -540,6 +540,7 @@ class SBAgent(Generic[DepsT, OutT]):
     def __init__(self, *, deps: DepsT | None = None) -> None:
         self._deps = deps
         self._pa_agent: Any | None = None
+        self._pa_agent_model: Any | None = None
 
     # ----- subclass hooks ---------------------------------------------
 
@@ -753,8 +754,6 @@ class SBAgent(Generic[DepsT, OutT]):
         return prompt
 
     def _get_pa_agent(self, *, route: Route) -> Any:
-        if self._pa_agent is not None:
-            return self._pa_agent
         try:
             from pydantic_ai import Agent  # type: ignore
         except ImportError as exc:  # pragma: no cover
@@ -763,11 +762,22 @@ class SBAgent(Generic[DepsT, OutT]):
                 f"cannot run agent {self.agent_id!r}"
             )
             raise RuntimeError(msg) from exc
+        override = current_model_override(self.agent_id) if self.agent_id else None
+        # Re-resolved on every call: ModelFactory re-checks the bearer's
+        # freshness (cheap) and only rebuilds the underlying pydantic-ai
+        # Model when the endpoint actually changed (e.g. a rotated
+        # token). Comparing against that same object lets a long-lived
+        # agent instance — e.g. the labeler, which loops hundreds of
+        # messages through one instance — skip rebuilding the Agent
+        # wrapper when nothing changed, while still picking up rotation
+        # instead of 401ing for the rest of its life on a stale bearer
+        # baked into the old model at first-call time.
+        model = default_factory().get(route, model_override=override)
+        if self._pa_agent is not None and self._pa_agent_model is model:
+            return self._pa_agent
         if self.output_type is None:
             msg = f"Agent {self.agent_id!r} must set output_type"
             raise TypeError(msg)
-        override = current_model_override(self.agent_id) if self.agent_id else None
-        model = default_factory().get(route, model_override=override)
         effective_prompt = self._resolve_system_prompt()
         agent_kwargs: dict[str, Any] = {
             "model": model,
@@ -780,6 +790,7 @@ class SBAgent(Generic[DepsT, OutT]):
         agent = Agent(**agent_kwargs)
         self.register_tools(agent)
         self._pa_agent = agent
+        self._pa_agent_model = model
         return agent
 
 
