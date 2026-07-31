@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +79,33 @@ def _runs(candidate: str) -> bool:
     return result.returncode == 0
 
 
+def _node_has_webcrypto(candidate: str) -> bool:
+    """True if ``candidate`` exposes ``globalThis.crypto.subtle``.
+
+    Baileys >=7 reads ``globalThis.crypto.subtle`` at import time and
+    crashes immediately (exit code 1, no usable message) without it.
+    That global is unavailable on Node < 19 (< 18 behind a flag). A
+    candidate can pass ``_runs()`` — it launches, prints a version —
+    while still being too old for this; version-manager shims (asdf,
+    nvm) in particular tend to resolve to whatever the project/global
+    pin says, which is easy to leave on an old Node for unrelated
+    reasons. Check the actual capability instead of trusting a version
+    number.
+
+    sensitivity_tier: 1
+    """
+    try:
+        result = subprocess.run(
+            [candidate, "-e", "process.exit(globalThis.crypto?.subtle ? 0 : 1)"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def _tool_candidates(name: str) -> Iterator[str]:
     """Yield existing executable candidates for ``name``, best first.
 
@@ -107,22 +134,35 @@ def _tool_candidates(name: str) -> Iterator[str]:
             yield str(candidate)
 
 
-def _resolve_tool(name: str) -> str | None:
+def _resolve_tool(
+    name: str,
+    extra_check: Callable[[str], bool] | None = None,
+) -> str | None:
     """Locate a WORKING ``name`` binary via PATH, then known locations.
 
-    Returns the first candidate that actually executes, or ``None``
-    when none does (the caller raises with an actionable message).
+    Returns the first candidate that actually executes — and, when
+    *extra_check* is given, also satisfies it — or ``None`` when none
+    does (the caller raises with an actionable message).
 
     sensitivity_tier: 1
     """
     for candidate in _tool_candidates(name):
-        if _runs(candidate):
-            return candidate
-        logger.warning(
-            "%s found at %s but it does not run; trying next candidate",
-            name,
-            candidate,
-        )
+        if not _runs(candidate):
+            logger.warning(
+                "%s found at %s but it does not run; trying next candidate",
+                name,
+                candidate,
+            )
+            continue
+        if extra_check is not None and not extra_check(candidate):
+            logger.warning(
+                "%s found at %s but failed a capability check; "
+                "trying next candidate",
+                name,
+                candidate,
+            )
+            continue
+        return candidate
     return None
 
 
@@ -230,11 +270,12 @@ class WhatsAppClient:
 
         self._ensure_npm_installed()
 
-        node = _resolve_tool("node")
+        node = _resolve_tool("node", extra_check=_node_has_webcrypto)
         if node is None:
             raise WhatsAppClientError(
-                "Node.js (node) not found in PATH or common install "
-                "locations — install Node 20+ (e.g. `brew install node`)",
+                "No Node.js with Web Crypto support (needed by Baileys) "
+                "found in PATH or common install locations — install "
+                "Node 20+ (e.g. `brew install node`)",
             )
 
         cmd = [
