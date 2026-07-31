@@ -153,10 +153,26 @@ def _last_user_text(messages: list[dict[str, str]]) -> str:
 def _redact_messages(
     messages: list[dict[str, str]],
 ) -> tuple[list[dict[str, str]], RedactionMap]:
-    """Run user/assistant message contents through the registry redactor.
+    """Run every message's content through the registry redactor.
 
-    System messages pass through untouched — they are internal
-    instructions and the placeholder map is meant for user content.
+    **System messages are redacted too.** They used to pass through, on
+    the reasoning that they are internal instructions — but that premise
+    does not hold for the two interactive agents. For ``chat`` and
+    ``brain``, ``SBAgent._resolve_system_prompt`` appends
+    ``build_user_context()`` (the user's name, age, location, timezone
+    and bio) plus learned facts and active topics to the system prompt.
+    Exempting the system role therefore shipped the user's profile to
+    the remote provider verbatim, in the very request whose *user* text
+    had just been placeholdered.
+
+    The codebase's own policy already said so: ``build_user_context`` is
+    annotated ``sensitivity_tier: 2``, and the egress firewall's rule is
+    that Tier 2+ text requires redaction before remote egress.
+
+    Redacting them costs nothing — the app's static instructions contain
+    no entities, so they pass through unchanged — and the round trip is
+    lossless, since rehydration restores the values in the response.
+
     Every match is registered in the process-wide
     :class:`RedactionRegistry`, so the next prompt that mentions the
     same entity reuses the same placeholder.
@@ -166,9 +182,6 @@ def _redact_messages(
     combined_map = RedactionMap()
     redacted_messages: list[dict[str, str]] = []
     for msg in messages:
-        if msg.get("role") == "system":
-            redacted_messages.append(dict(msg))
-            continue
         content = str(msg.get("content", ""))
         new_text, mapping = redact_with_registry(content)
         for original, placeholder in mapping.forward.items():
