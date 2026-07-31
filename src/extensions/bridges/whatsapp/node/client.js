@@ -311,6 +311,19 @@ let storeInterval = null;
 let selfChatPollInterval = null;
 let shuttingDown = false;
 
+/** Wipe stored credentials/session keys after a logged-out disconnect,
+ * keeping `store.json` (local message history) intact. */
+function clearAuthState() {
+  try {
+    for (const entry of fs.readdirSync(AUTH_DIR)) {
+      if (entry === "store.json") continue;
+      fs.rmSync(path.join(AUTH_DIR, entry), { recursive: true, force: true });
+    }
+  } catch (err) {
+    process.stderr.write(`Failed to clear stale auth state: ${err.message}\n`);
+  }
+}
+
 async function connectSocket() {
   if (shuttingDown) return;
 
@@ -359,10 +372,20 @@ async function connectSocket() {
       const reason = lastDisconnect?.error?.message || `status ${statusCode}`;
       emit({ type: "connection", status: "close", reason, code: statusCode });
 
-      // Fatal disconnect — do not reconnect
+      // Device unlinked from the phone — the stored session is dead and
+      // every future connectSocket() would hit the same loggedOut status
+      // forever. Clear the stale credentials and start a fresh session
+      // so Baileys issues a new `qr` event instead of crash-looping.
       if (statusCode === DisconnectReason.loggedOut) {
-        process.stderr.write("Logged out — cannot reconnect.\n");
-        shutdown(1);
+        process.stderr.write("Logged out — clearing session and requesting re-pair.\n");
+        try {
+          sock?.ws?.close();
+        } catch {
+          // Best effort
+        }
+        clearAuthState();
+        reconnectAttempts = 0;
+        setTimeout(connectSocket, 1000);
         return;
       }
 
