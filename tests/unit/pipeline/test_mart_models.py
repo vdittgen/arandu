@@ -163,6 +163,26 @@ def _materialize_intermediate(engine: DatabaseEngine) -> None:
         engine.execute(f"CREATE TABLE {name} AS {sql}")
 
 
+def _local_day(engine: DatabaseEngine, value: str) -> str:
+    """The local calendar day of a stored timestamp.
+
+    Mirrors the rule in `mart_today.sql`: a value carrying an explicit
+    zone is an instant and gets converted; a bare date is already a
+    calendar day and is left alone. Stated here independently so a
+    change to the mart's rule has to be reconciled with a test that
+    spells out the intent, rather than silently agreeing with itself.
+
+    Slicing the string instead would be wrong: an evening event stored
+    as UTC ("...T02:30:00Z") is today locally but reads as tomorrow.
+    """
+    return engine.query(
+        "SELECT CASE "
+        "WHEN ? LIKE '%Z' OR ? GLOB '*[+-][0-9][0-9]:[0-9][0-9]' "
+        "THEN DATE(?, 'localtime') ELSE DATE(?) END AS d",
+        [value] * 4,
+    )[0]["d"]
+
+
 def _run_mart(engine: DatabaseEngine, model_name: str) -> list[dict]:
     """Run a mart model SQL and return all rows."""
     sql = _read_model_sql(MARTS_DIR / f"{model_name}.sql")
@@ -319,27 +339,88 @@ class TestMartToday:
             assert row["coaching_phrase"] is None
 
     def test_filters_to_current_date(self, pipeline_db: DatabaseEngine) -> None:
-        """All rows should have occurred_at on today's date.
+        """All rows fall on the user's local day.
 
         Fixture data is from 2025, so today's mart should be empty here.
 
-        "Today" is read from the database rather than from Python. The
-        mart filters on ``DATE('now')`` — SQLite's **UTC** clock —
-        while ``datetime.date.today()`` is the machine's **local** date,
-        so this assertion failed for anyone west of UTC between local
-        and UTC midnight, on code they had not touched. Asking the same
-        engine the mart asks makes the test state the real invariant
-        ("every row falls on the mart's notion of today") and hold in
+        "Today" is read from the database rather than from Python, so
+        the test states the invariant the mart implements and holds in
         every timezone.
-
-        That the two clocks disagree at all is a product bug rather than
-        just a test bug — tracked separately; see #91.
         """
         rows = _run_mart(pipeline_db, "mart_today")
-        today_str = pipeline_db.query("SELECT DATE('now') AS d")[0]["d"]
+        today = pipeline_db.query(
+            "SELECT DATE('now', 'localtime') AS d",
+        )[0]["d"]
         for row in rows:
-            # SQLite returns datetime strings; extract just the date part
-            assert row["occurred_at"][:10] == today_str
+            assert _local_day(pipeline_db, row["occurred_at"]) == today
+
+    def test_includes_events_on_the_local_day_not_the_utc_day(
+        self, pipeline_db: DatabaseEngine,
+    ) -> None:
+        """An event on the local day must appear even when UTC disagrees.
+
+        `DATE('now')` is UTC, so a user at a negative offset lost the
+        rest of their evening from the feed the moment UTC rolled over,
+        and one at a positive offset lost their early morning.
+
+        The instant is derived from the machine's real offset rather
+        than a hardcoded one, so the row genuinely straddles the UTC
+        day boundary in whatever zone the suite runs in: late evening
+        west of UTC, early morning east of it. Stored with a `Z`, the
+        shape the Apple and Gmail bridges write.
+        """
+        offset_is_negative = pipeline_db.query(
+            "SELECT datetime('now', 'localtime') < datetime('now') AS neg",
+        )[0]["neg"]
+        local_time = "23:30:00" if offset_is_negative else "00:30:00"
+
+        row = pipeline_db.query(
+            "SELECT DATE('now', 'localtime') AS day, "
+            "strftime('%Y-%m-%dT%H:%M:%SZ', "
+            "         datetime(DATE('now', 'localtime') || ' ' || ?, 'utc')"
+            ") AS instant",
+            [local_time],
+        )[0]
+        pipeline_db.execute(
+            "INSERT INTO int_events_enriched "
+            "(id, title, description, start_time, event_category, "
+            " duration_minutes, sensitivity_tier, event_origin) "
+            "VALUES ('tz-evt', 'Edge-of-day call', '', ?, 'meeting', 30, "
+            "1, 'organizer')",
+            [row["instant"]],
+        )
+
+        rows = _run_mart(pipeline_db, "mart_today")
+
+        assert "tz-evt" in {r["id"] for r in rows}
+        assert _local_day(pipeline_db, row["instant"]) == row["day"]
+
+    def test_all_day_events_are_not_shifted_a_day(
+        self, pipeline_db: DatabaseEngine,
+    ) -> None:
+        """A bare date is already a calendar day — don't convert it.
+
+        This is the trap in the obvious fix: adding `'localtime'`
+        unconditionally makes SQLite read "2026-08-03" as midnight UTC
+        and shift it to the previous day for every negative offset, so
+        all-day events (and bare reminder due dates) would silently
+        disappear from the feed.
+        """
+        local_today = pipeline_db.query(
+            "SELECT DATE('now', 'localtime') AS d",
+        )[0]["d"]
+        pipeline_db.execute(
+            "INSERT INTO int_events_enriched "
+            "(id, title, description, start_time, event_category, "
+            " duration_minutes, sensitivity_tier, event_origin) "
+            "VALUES ('tz-allday', 'Holiday', '', ?, 'meeting', 0, 1, "
+            "'organizer')",
+            [local_today],
+        )
+
+        rows = _run_mart(pipeline_db, "mart_today")
+
+        assert "tz-allday" in {r["id"] for r in rows}
 
 
 # ---------------------------------------------------------------------------

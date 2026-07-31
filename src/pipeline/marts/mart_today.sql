@@ -17,6 +17,35 @@
         event_origin:     tier 1
         coaching_phrase:  tier 2
         _loaded_at:       tier 1
+
+    "Today" means the user's local calendar day, not UTC.
+
+    `DATE('now')` is SQLite's UTC clock. Filtering on it meant that for
+    a user at UTC-3 the feed rolled over to tomorrow from 21:00 local:
+    the rest of today's events vanished and tomorrow's appeared. At
+    UTC+14 it was wrong the other way for ten hours a day. Only UTC
+    users ever saw the right day for a full 24 hours.
+
+    Both sides of each comparison therefore need care, because the
+    stored values are not all the same kind of thing:
+
+      - A value carrying an explicit zone ("...Z" or "...+05:30")
+        denotes an *instant*. Which local day it falls on depends on
+        the reader, so it must be converted: DATE(v, 'localtime').
+      - A bare date ("2026-08-03" — all-day events, some reminder due
+        dates) is already a calendar day. Converting it would shift it
+        a day backwards for every negative UTC offset, so it must be
+        left alone.
+      - A naive datetime has no zone to convert from, and is treated as
+        already being in the reader's frame.
+
+    Hence `local_day()` below, spelled out inline because these models
+    are executed as plain SQL against SQLite with no UDFs registered.
+
+    The reference clock is the machine's timezone. For a local-first
+    desktop app that is the clock the user is reading; `user_timezone`
+    in settings is a declared preference used for prompt context, and
+    routing it here would mean parameterising the mart models.
 */
 
 SELECT
@@ -32,7 +61,12 @@ SELECT
     CAST(NULL AS TEXT)                      AS coaching_phrase,
     datetime('now')                         AS _loaded_at
 FROM int_events_enriched e
-WHERE DATE(e.start_time) = DATE('now')
+WHERE CASE
+           WHEN e.start_time LIKE '%Z'
+             OR e.start_time GLOB '*[+-][0-9][0-9]:[0-9][0-9]'
+           THEN DATE(e.start_time, 'localtime')
+           ELSE DATE(e.start_time)
+       END = DATE('now', 'localtime')
 
 UNION ALL
 
@@ -49,7 +83,12 @@ SELECT
     CAST(NULL AS TEXT)                      AS coaching_phrase,
     datetime('now')                         AS _loaded_at
 FROM int_personal_enriched m
-WHERE DATE(m.timestamp) = DATE('now')
+WHERE CASE
+           WHEN m.timestamp LIKE '%Z'
+             OR m.timestamp GLOB '*[+-][0-9][0-9]:[0-9][0-9]'
+           THEN DATE(m.timestamp, 'localtime')
+           ELSE DATE(m.timestamp)
+       END = DATE('now', 'localtime')
 
 UNION ALL
 
@@ -66,7 +105,12 @@ SELECT
     CAST(NULL AS TEXT)                      AS coaching_phrase,
     datetime('now')                         AS _loaded_at
 FROM stg_notes n
-WHERE DATE(n.created_at) = DATE('now')
+WHERE CASE
+           WHEN n.created_at LIKE '%Z'
+             OR n.created_at GLOB '*[+-][0-9][0-9]:[0-9][0-9]'
+           THEN DATE(n.created_at, 'localtime')
+           ELSE DATE(n.created_at)
+       END = DATE('now', 'localtime')
 
 UNION ALL
 
@@ -87,7 +131,12 @@ SELECT
     CAST(NULL AS TEXT)                      AS coaching_phrase,
     datetime('now')                         AS _loaded_at
 FROM stg_emails e
-WHERE DATE(e.date) = DATE('now')
+WHERE CASE
+           WHEN e.date LIKE '%Z'
+             OR e.date GLOB '*[+-][0-9][0-9]:[0-9][0-9]'
+           THEN DATE(e.date, 'localtime')
+           ELSE DATE(e.date)
+       END = DATE('now', 'localtime')
 
 UNION ALL
 
@@ -96,7 +145,8 @@ SELECT
     r.id,
     r.title,
     r.notes                                 AS detail,
-    COALESCE(r.due_date, datetime('now'))   AS occurred_at,
+    COALESCE(r.due_date,
+             datetime('now', 'localtime'))  AS occurred_at,
     COALESCE(r.list_name, 'default')        AS category,
     CAST(NULL AS INTEGER)                   AS duration_minutes,
     r.sensitivity_tier,
@@ -104,6 +154,11 @@ SELECT
     CAST(NULL AS TEXT)                      AS coaching_phrase,
     datetime('now')                         AS _loaded_at
 FROM stg_reminders r
-WHERE (DATE(r.due_date) = DATE('now')
+WHERE (CASE
+           WHEN r.due_date LIKE '%Z'
+             OR r.due_date GLOB '*[+-][0-9][0-9]:[0-9][0-9]'
+           THEN DATE(r.due_date, 'localtime')
+           ELSE DATE(r.due_date)
+       END = DATE('now', 'localtime')
        OR r.due_date IS NULL)
   AND (r.completed IS NULL OR r.completed = 0)
