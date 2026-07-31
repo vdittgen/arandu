@@ -335,3 +335,86 @@ def test_block_does_not_affect_siblings(tmp_path: Path) -> None:
         assert captured == ["local"]
     finally:
         set_provider_factory_for_tests(None)
+
+
+# ---------------------------------------------------------------------------
+# Redaction chokepoint (_redact_messages)
+# ---------------------------------------------------------------------------
+#
+# These exercise `_redact_messages` directly rather than through
+# `chat_via_firewalls`, because the integration path is unreachable in
+# this build: `EgressFirewall.route()` hardcodes local_ollama, so
+# `requires_redaction and route == "remote"` never holds. That makes the
+# helper a latent trap rather than a live leak — worth pinning precisely
+# because nothing else would catch a regression in it.
+
+
+def test_redact_messages_redacts_system_role() -> None:
+    """System messages are not exempt.
+
+    They used to pass through as "internal instructions", but for the
+    chat/brain agents `SBAgent._resolve_system_prompt` appends
+    `build_user_context()` — name, age, location, timezone, bio — plus
+    learned facts. Exempting the role shipped the user's profile
+    verbatim in the same request whose user text had been placeholdered.
+    """
+    from src.models.llm_gateway import _redact_messages
+
+    system_prompt = (
+        "You are Arandu.\n"
+        "User's name: Marina Silva\n"
+        "User's location: Porto Alegre\n"
+        "Learned facts:\n- Therapist is marina@example.com"
+    )
+    redacted, mapping = _redact_messages([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "remind me about the appointment"},
+    ])
+
+    wire = redacted[0]["content"]
+    for raw in ("Marina Silva", "Porto Alegre", "marina@example.com"):
+        assert raw not in wire, f"{raw!r} survived redaction"
+    # Lossless: rehydration restores the prompt exactly.
+    from src.models.redactor import rehydrate
+
+    assert rehydrate(wire, mapping) == system_prompt
+
+
+def test_redact_messages_leaves_entity_free_instructions_alone() -> None:
+    """Redacting system prompts costs nothing when they hold no entities.
+
+    The app's own static instructions must survive byte-identical, or
+    every agent's behaviour would shift the moment redaction engaged.
+    """
+    from src.models.llm_gateway import _redact_messages
+
+    instructions = (
+        "You are a concise assistant. Answer in at most three sentences. "
+        "Never invent facts you were not given."
+    )
+    redacted, mapping = _redact_messages(
+        [{"role": "system", "content": instructions}],
+    )
+
+    assert redacted[0]["content"] == instructions
+    assert mapping.reverse == {}
+
+
+def test_redact_messages_shares_placeholders_across_roles() -> None:
+    """The same entity gets one placeholder in system and user text.
+
+    Per-role maps would hand the model two tokens for one person and
+    break its ability to connect the instruction to the question.
+    """
+    from src.models.llm_gateway import _redact_messages
+
+    redacted, mapping = _redact_messages([
+        {"role": "system", "content": "You assist Marina Silva."},
+        {"role": "user", "content": "What did Marina Silva ask for?"},
+    ])
+
+    placeholders = [p for p, raw in mapping.reverse.items() if raw == "Marina Silva"]
+    assert len(placeholders) == 1
+    token = placeholders[0]
+    assert token in redacted[0]["content"]
+    assert token in redacted[1]["content"]
