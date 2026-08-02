@@ -6,16 +6,13 @@ Every component that wants to call the LLM should go through
 1. Checks the per-agent block table (set when local-only mode is on
    and the agent's eval suite failed).
 2. Runs the prompt-injection firewall.
-3. Resolves the egress decision (route + tier + redaction flag).
-4. Applies the persistent registry-backed redactor when the decision
-   demands it.
-5. Acquires a scheduler permit at the right tier.
-6. Builds the right :class:`LLMProvider` for the resolved route
+3. Resolves the egress decision (route + tier) and persists the
+   prompt detail for audit drill-down.
+4. Acquires a scheduler permit at the right tier.
+5. Builds the right :class:`LLMProvider` for the resolved route
    — callers no longer pick the provider themselves. Arandu
    always resolves to local Ollama.
-7. Calls the provider and rehydrates the response when redaction was
-   applied.
-8. Returns a :class:`LLMResponse`.
+6. Calls the provider and returns a :class:`LLMResponse`.
 
 CLAUDE.md pitfall #11 explicitly forbids skipping the firewall "for
 convenience": this module exists so call sites don't need to choose
@@ -30,10 +27,9 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from src.agents.core.audit import default_chain, hash_payload
+from src.agents.core.audit import hash_payload
 from src.agents.core.scheduler import Tier, default_scheduler
 from src.agents.firewall.egress_firewall import (
-    AgentRequest,
     ComplexityTier,
     Lane,
     default_egress_firewall,
@@ -45,7 +41,6 @@ from src.agents.firewall.injection_firewall import (
 from src.agents.firewall.lane_context import lane_scope
 from src.models.llm_provider import LLMProvider, LLMResponse
 from src.models.redaction_store import default_redaction_store
-from src.models.redactor import RedactionMap, redact_with_registry, rehydrate
 
 logger = logging.getLogger(__name__)
 
@@ -150,47 +145,6 @@ def _last_user_text(messages: list[dict[str, str]]) -> str:
     )
 
 
-def _redact_messages(
-    messages: list[dict[str, str]],
-) -> tuple[list[dict[str, str]], RedactionMap]:
-    """Run every message's content through the registry redactor.
-
-    **System messages are redacted too.** They used to pass through, on
-    the reasoning that they are internal instructions — but that premise
-    does not hold for the two interactive agents. For ``chat`` and
-    ``brain``, ``SBAgent._resolve_system_prompt`` appends
-    ``build_user_context()`` (the user's name, age, location, timezone
-    and bio) plus learned facts and active topics to the system prompt.
-    Exempting the system role therefore shipped the user's profile to
-    the remote provider verbatim, in the very request whose *user* text
-    had just been placeholdered.
-
-    The codebase's own policy already said so: ``build_user_context`` is
-    annotated ``sensitivity_tier: 2``, and the egress firewall's rule is
-    that Tier 2+ text requires redaction before remote egress.
-
-    Redacting them costs nothing — the app's static instructions contain
-    no entities, so they pass through unchanged — and the round trip is
-    lossless, since rehydration restores the values in the response.
-
-    Every match is registered in the process-wide
-    :class:`RedactionRegistry`, so the next prompt that mentions the
-    same entity reuses the same placeholder.
-
-    sensitivity_tier: 3 (map holds raw Tier 3 values)
-    """
-    combined_map = RedactionMap()
-    redacted_messages: list[dict[str, str]] = []
-    for msg in messages:
-        content = str(msg.get("content", ""))
-        new_text, mapping = redact_with_registry(content)
-        for original, placeholder in mapping.forward.items():
-            combined_map.forward[original] = placeholder
-            combined_map.reverse[placeholder] = original
-        redacted_messages.append({**msg, "content": new_text})
-    return redacted_messages, combined_map
-
-
 def chat_via_firewalls(
     messages: list[dict[str, str]],
     *,
@@ -213,13 +167,14 @@ def chat_via_firewalls(
             accounting and the scheduler tier.
         agent_max_tier: Maximum sensitivity tier the caller is
             authorised to handle (from the agent manifest).
-        complexity: ``"fast" | "balanced" | "deep"``. ``"deep"`` on
-            :attr:`Lane.ESCALATION` routes to the reasoner model.
+        complexity: ``"fast" | "balanced" | "deep"``. Accepted for
+            forward compatibility with callers; currently inert, since
+            every route resolves to the same local model regardless.
         explicit_tier: Optional pre-computed tier (e.g. from an
             upstream classifier). When ``None`` the egress firewall
             runs its own classifier.
         model_override: Optional model id to substitute for the
-            provider's default. Honoured only for the remote route.
+            provider's default.
 
     Raises:
         GatewayBlocked: When the injection firewall blocks the prompt
@@ -267,79 +222,33 @@ def chat_via_firewalls(
             f"Egress firewall blocked the call: {egress.reason}",
         )
 
-    outbound_messages = messages
-    redaction_map: RedactionMap | None = None
-    # Same hash that the prior egress_decision row carries, so the UI
-    # can match a clicked audit row to its stored detail blob.
+    # Same hash the egress_decision row carries, so the UI can match a
+    # clicked audit row to its stored detail blob.
     user_text_hash = hash_payload(user_text)
-    if egress.requires_redaction and egress.route == "remote":
-        outbound_messages, redaction_map = _redact_messages(messages)
-        default_chain().append(
-            event_type="egress_redaction",
-            agent_id=agent_id,
-            decision="applied",
-            payload_hash=user_text_hash,
-            extra={
-                "placeholders": sorted(redaction_map.reverse.keys()),
-                "lane": lane.value,
-            },
-        )
 
-    # Persist the prompt detail for every call (redacted or not) so
-    # every egress_decision row in the audit log is clickable. When
-    # nothing was redacted, redacted_messages == original_messages and
-    # placeholder_map is empty — the UI renders a single
-    # "Message content" section in that case. 24h retention applies.
+    # Persist the prompt detail for every call so every egress_decision
+    # row in the audit log is clickable. 24h retention applies.
     try:
         default_redaction_store().store(
             payload_hash=user_text_hash,
             agent_id=agent_id,
             lane=lane.value,
             original_messages=[dict(m) for m in messages],
-            redacted_messages=[dict(m) for m in outbound_messages],
-            placeholder_map=(
-                dict(redaction_map.reverse) if redaction_map else {}
-            ),
+            redacted_messages=[dict(m) for m in messages],
+            placeholder_map={},
         )
     except Exception as exc:  # noqa: BLE001
         # Detail persistence is non-critical — the LLM call must
         # still proceed even if disk writes fail.
         logger.warning("Failed to persist prompt detail: %s", exc)
 
-    # When the classifier says "remote", run the lane endpoint
-    # resolution to pick the right model and apply the spend-cap gate.
-    # The spend tracker may downgrade Pro→Flash on soft breach or force
-    # local on hard breach; we re-read the route from the resolved
-    # endpoint so downstream metering / scheduling agrees with reality.
     resolved_route = egress.route
-    chosen_model = model_override
-    if egress.route == "remote":
-        endpoint = default_egress_firewall().route(
-            AgentRequest(
-                lane=lane,
-                sensitivity_tier=egress.max_tier,
-                complexity_tier=complexity,
-            ),
-        )
-        if endpoint.provider == "local_ollama":
-            resolved_route = "local"
-            chosen_model = endpoint.model
-        elif not chosen_model:
-            chosen_model = endpoint.model
-
     provider = _build_provider(route=resolved_route)
     scheduler_tier = _tier_to_scheduler(lane)
     with scheduler.acquire_context(scheduler_tier, resolved_route, agent_id):
         with lane_scope(lane):
-            response = provider.chat(outbound_messages, model=chosen_model)
+            response = provider.chat(messages, model=model_override)
 
-    if redaction_map is not None:
-        rehydrated = rehydrate(response.content, redaction_map)
-        response = LLMResponse(
-            content=rehydrated,
-            model=response.model,
-            usage=response.usage,
-        )
     return response
 
 

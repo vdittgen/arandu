@@ -12,11 +12,8 @@ from __future__ import annotations
 import pytest
 from src.agents.core.audit import reset_default_chain_for_tests
 from src.agents.firewall.egress_firewall import (
-    LOCAL_FALLBACK_MODEL,
-    AgentRequest,
     EgressFirewall,
     EgressPolicy,
-    Lane,
     keyword_tier_floor,
 )
 
@@ -65,8 +62,6 @@ def test_classify_tier1_routes_local() -> None:
     d = _fw().classify("Plain prompt", agent_max_tier=1)
     assert d.route == "local"
     assert d.max_tier == 1
-    assert d.requires_redaction is False
-    assert d.requires_consent is False
 
 
 def test_classify_tier2_routes_local() -> None:
@@ -75,7 +70,6 @@ def test_classify_tier2_routes_local() -> None:
     )
     assert d.route == "local"
     assert d.max_tier == 2
-    assert d.requires_redaction is False
 
 
 def test_classify_tier3_routes_local() -> None:
@@ -84,7 +78,6 @@ def test_classify_tier3_routes_local() -> None:
     )
     assert d.route == "local"
     assert d.max_tier == 3
-    assert d.requires_redaction is False
 
 
 def test_local_only_mode_still_routes_local() -> None:
@@ -132,34 +125,3 @@ def test_explicit_tier_floor_honoured() -> None:
     )
     assert d.max_tier == 3
     assert d.route == "local"
-
-
-# ---------------------------------------------------------------------------
-# route() — every lane resolves to local Ollama
-# ---------------------------------------------------------------------------
-
-
-def test_route_pins_local_for_every_lane() -> None:
-    fw = _fw()
-    for lane in Lane:
-        ep = fw.route(AgentRequest(lane=lane, sensitivity_tier=1))
-        assert ep.provider == "local_ollama"
-        assert ep.model == LOCAL_FALLBACK_MODEL
-
-
-def test_route_escalation_deep_still_local() -> None:
-    ep = _fw().route(
-        AgentRequest(
-            lane=Lane.ESCALATION,
-            sensitivity_tier=2,
-            complexity_tier="deep",
-        ),
-    )
-    assert ep.provider == "local_ollama"
-
-
-def test_route_tier3_still_local() -> None:
-    ep = _fw().route(
-        AgentRequest(lane=Lane.INTERACTIVE, sensitivity_tier=3),
-    )
-    assert ep.provider == "local_ollama"

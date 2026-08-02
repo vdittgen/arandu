@@ -100,13 +100,18 @@ Audit event types relevant to egress:
 There is **no per-call consent event** — no per-call data ever
 leaves the device, so there is nothing to consent to.
 
-## Redaction registry (extension point)
+## Redaction registry (local utility, not an egress path)
 
-`redaction_registry.sqlite` is present in the codebase as an
-extension point for redact-then-send flows: it maps high-signal
-entities (people, places, emails, phone numbers, account/money
-amounts, dates) to stable placeholders before any outbound call.
-Because Arandu never egresses, the registry is not exercised.
+`redaction_registry.sqlite` maps high-signal entities (people,
+places, emails, phone numbers, account/money amounts, dates) to
+stable placeholders. It is not part of the main gateway's egress
+path — `chat_via_firewalls` never calls it, since every route it
+resolves is local. A small number of other call sites use it for
+their own local purposes independent of egress: `brain/actions.py`
+rehydrates redacted tool-argument values back through the registry
+before resolving a recipient, and the injection-scan sub-agent (a
+separate routing decision from the main gateway) redacts what it
+sends to its own scan model when configured for that.
 
 When the registry is in use it holds raw user values paired with
 their placeholders — Tier 3 data. It is:

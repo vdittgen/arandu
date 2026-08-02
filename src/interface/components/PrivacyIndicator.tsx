@@ -7,7 +7,6 @@ interface AppSettings {
   readonly llm_provider: string;
   readonly llm_model: string;
   readonly llm_host: string;
-  readonly local_inference_for_sensitive: boolean;
 }
 
 interface Routing {
@@ -31,16 +30,16 @@ function providerDisplayName(provider: string, host: string): string {
 }
 
 function deriveRouting(settings: AppSettings): Routing {
-  const provider = providerDisplayName(settings.llm_provider, settings.llm_host);
-
-  if (settings.local_inference_for_sensitive) {
-    return { mode: "local", label: "Local" };
-  }
-
+  // The provider decides where traffic actually goes; the "keep
+  // sensitive topics local" toggle does not change that. Checking the
+  // toggle first used to show a green "Local" badge for a remote
+  // provider whenever the toggle was on — reassuring the user while
+  // traffic egressed.
   if (settings.llm_provider === "ollama") {
     return { mode: "local", label: "Local" };
   }
 
+  const provider = providerDisplayName(settings.llm_provider, settings.llm_host);
   return { mode: "remote", label: provider };
 }
 

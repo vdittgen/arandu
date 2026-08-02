@@ -128,15 +128,15 @@ All AI components use the `LLMProvider` abstraction (`src/models/llm_provider.py
 
 ### Layer 4 — Privacy Firewalls
 
-Privacy enforcement is split across Python (the live runtime) and Rust (the audit chain reader). There is no per-call consent dialog: the user picks a privacy mode once at onboarding (remote-default vs local-only) and the firewalls enforce that contract automatically thereafter. See `docs/PRIVACY.md` for the full model.
+Privacy enforcement is split across Python (the live runtime) and Rust (the audit chain reader). Arandu never egresses — the `remote-default` / `local-only` policy field on disk is a forward-compatible extension point that both currently resolve to the same local-only behavior. See `docs/PRIVACY.md` for the full model.
 
 **Injection Firewall** (`src/agents/firewall/injection_firewall.py`) inspects inbound prompts for injection attempts and either blocks them or strips the offending segment before the request reaches the model.
 
-**Egress Firewall** (`src/agents/firewall/egress_firewall.py`) computes the maximum sensitivity tier across keyword floor, agent manifest, and (in local-only mode) an LLM classifier. It then decides the route (`remote` / `local`) and whether redaction is required. `requires_consent` is always false — captured during onboarding, not per call.
+**Egress Firewall** (`src/agents/firewall/egress_firewall.py`) computes the maximum sensitivity tier across keyword floor, agent manifest, and (in local-only mode) an LLM classifier, and records the decision to the audit chain. Arandu resolves every route to the local Ollama backend regardless of tier or policy — the tier computation exists for audit visibility into how sensitive local traffic is, not to gate where it goes.
 
-**Placeholder Registry** (`src/models/redaction_registry.py`) is the privacy chokepoint. Under remote-default, every Tier 2/3 PII value (names, emails, phones, dates, money) is swapped for a stable placeholder (`<PERSON_3>`, `<EMAIL_2>`) before the prompt leaves the device. Responses are rehydrated locally. Raw values never reach the remote provider.
+**Placeholder Registry** (`src/models/redaction_registry.py`, `src/models/redactor.py`) is a local defense-in-depth utility, not part of the egress path — Arandu never egresses, so there is nothing to redact before a remote call. It is exercised by callers that want entity scrubbing for other reasons (e.g. `brain/actions.py` extracting tool arguments, the injection scanner labeling its own findings).
 
-**Audit Chain** is a SHA-256 hash-chained JSONL file at `~/.arandu/data/audit.jsonl`. Python writes every firewall decision (`egress_decision`, `egress_redaction`, `local_inference_toggle`); Rust (`src-tauri/src/firewall/audit.rs`) reads and verifies it for the Audit Log page. Append-only, no delete API; `verify_chain()` confirms tamper-evidence on demand.
+**Audit Chain** is a SHA-256 hash-chained JSONL file at `~/.arandu/data/audit.jsonl`. Python writes every firewall decision (`egress_decision`, `prompt_scan`, `local_inference_toggle`); Rust (`src-tauri/src/firewall/audit.rs`) reads and verifies it for the Audit Log page. The chain and its Rust reader treat `event_type` as free-form, so other builds can append their own event types without an OSS change. Append-only, no delete API; `verify_chain()` confirms tamper-evidence on demand.
 
 ### Layer 5 — Brain Interface (Tauri + React)
 
@@ -278,9 +278,9 @@ Every column in every table is classified:
 
 | Tier | Level | Examples | Agent Access |
 |------|-------|----------|--------------|
-| 1 | Public | Preferences, categories, file names, event titles | Pass-through to remote |
-| 2 | Personal | Names, routines, schedules, contact info, locations | Auto-redacted via placeholder registry before remote egress |
-| 3 | Sensitive | Health metrics, finances, emotions, traumas, message body | Auto-redacted; raw values never leave the device |
+| 1 | Public | Preferences, categories, file names, event titles | Accessible to any agent |
+| 2 | Personal | Names, routines, schedules, contact info, locations | Requires agent manifest `max_sensitivity_tier >= 2` |
+| 3 | Sensitive | Health metrics, finances, emotions, traumas, message body | Requires agent manifest `max_sensitivity_tier >= 3`; raw values never leave the device (Arandu never egresses) |
 
 **Enforcement at every layer:**
 
@@ -290,7 +290,7 @@ Every column in every table is classified:
 4. **SQLite queries** — `WHERE sensitivity_tier <= ?` on all data retrieval
 5. **Kuzu traversals** — `WHERE r.sensitivity_tier <= $max_tier` on all edge queries
 6. **ChromaDB searches** — `{"sensitivity_tier": {"$lte": max_tier}}` metadata filter
-7. **Firewall** — Egress firewall classifies the prompt and redacts Tier 2/3 PII via the placeholder registry before remote egress
+7. **Firewall** — Egress firewall classifies the prompt's tier and routes every call to the local Ollama backend, recording the decision to the audit chain
 8. **Agent sandbox** — Agents can only access fields declared in their manifest scope
 
 ### Request Lifecycle (LLM call)
@@ -303,23 +303,15 @@ INJECTION FIREWALL: scan messages, block/strip injection attempts
     │
     ▼
 EGRESS CLASSIFY: max tier across keyword floor, agent manifest, (local-only) LLM classifier
-    │
+    │  every policy resolves to route="local" — Ollama keeps raw values on-device
     ▼
-ROUTE DECISION:
-    │  local-only mode → route="local", no redaction (Ollama keeps raw values on-device)
-    │  remote-default + Tier 1 → route="remote", no redaction
-    │  remote-default + Tier 2/3 → route="remote", redaction required
-    ▼
-REDACT (if required): swap PII for placeholders via persistent registry
+PERSIST PROMPT DETAIL: store original messages, keyed by payload hash, for audit drill-down
     │
     ▼
 PROVIDER CALL: Ollama (local)
     │
     ▼
-REHYDRATE: locally replace placeholders in the response
-    │
-    ▼
-AUDIT: append `egress_decision` and (if redacted) `egress_redaction` to audit.jsonl
+AUDIT: append `egress_decision` to audit.jsonl
 ```
 
 ### Request Lifecycle (Action Execution)
@@ -498,7 +490,7 @@ When user interest in a new data domain crosses a threshold and enough raw data 
 
 7. **AI-assisted but human-approved** — Schema discovery, field mapping, sensitivity classification, and pipeline model generation are AI-assisted. But no generated model goes live without human approval.
 
-8. **Fail-safe defaults** — Unknown fields default to Tier 3 (redacted in remote-default). All MCP actions require confirmation. Audit chain tampering is detected by `verify_chain()`.
+8. **Fail-safe defaults** — Unknown fields default to Tier 3 (most restrictive agent-access gate). All MCP actions require confirmation. Audit chain tampering is detected by `verify_chain()`.
 
 9. **Namespace isolation** — Extensions can only create tables prefixed with `ext_{id}_`. They cannot modify core pipeline models. Generated models are sandboxed. This prevents any extension from corrupting the core data layer.
 
