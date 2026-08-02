@@ -1,4 +1,4 @@
-"""Egress firewall — decides which model an LLM or embedding call may reach.
+"""Egress firewall — decides which model an LLM call may reach.
 
 In Arandu every call resolves to the local Ollama backend. The
 firewall still classifies the prompt's sensitivity tier (Tier 1 / 2 /
@@ -13,9 +13,6 @@ Tier classification is *upper-bound*: the firewall takes the maximum
 of (agent's ``max_sensitivity_tier``, the explicit tier passed in by
 the caller, and a quick keyword pre-classification of the prompt
 text).
-
-Embeddings follow the same routing rule: :meth:`EgressFirewall.route_embedding`
-returns an :class:`EmbeddingEndpoint` that mirrors chat locality.
 
 sensitivity_tier: 1
 """
@@ -40,12 +37,9 @@ logger = logging.getLogger(__name__)
 # call locally regardless of which of these is selected; the
 # ``remote-default`` value is a reserved extension point.
 RoutingPolicy = Literal["remote-default", "local-only"]
-ProviderName = Literal["local_ollama", "remote"]
 ComplexityTier = Literal["fast", "balanced", "deep"]
 
 SETTINGS_PATH = Path.home() / ".arandu" / "settings.json"
-
-LOCAL_FALLBACK_MODEL = "gemma4:e2b"
 
 
 class Lane(enum.Enum):
@@ -67,88 +61,11 @@ class Lane(enum.Enum):
     CODING = "coding"
 
 
-@dataclass(frozen=True)
-class AgentRequest:
-    """Input to :meth:`EgressFirewall.route`.
-
-    ``sensitivity_tier`` is the resolved upper-bound tier of the
-    prompt. ``complexity_tier`` distinguishes routine work from
-    "deep" reasoning requests that warrant the R1-class model on
-    :data:`Lane.ESCALATION`.
-
-    sensitivity_tier: 1
-    """
-
-    lane: Lane
-    sensitivity_tier: int
-    complexity_tier: ComplexityTier = "balanced"
-
-
-@dataclass(frozen=True)
-class ProviderEndpoint:
-    """A resolved routing target.
-
-    Carries enough information for the caller to (a) instantiate the
-    right provider client and (b) attribute the call to a lane for
-    spend accounting (Phase 1).
-
-    sensitivity_tier: 1
-    """
-
-    provider: ProviderName
-    model: str
-    lane: Lane
-    reason: str = ""
-
-
 class EgressFirewallError(Exception):
     """Raised when an egress decision can't be made.
 
     sensitivity_tier: 1
     """
-
-
-# ---------------------------------------------------------------------------
-# Embedding routing — Phase 2
-# ---------------------------------------------------------------------------
-
-
-EmbeddingProviderName = Literal["local_ollama", "remote_openai"]
-
-
-@dataclass(frozen=True)
-class EmbeddingRequest:
-    """Input to :meth:`EgressFirewall.route_embedding`.
-
-    ``sensitivity_tier`` is the resolved upper-bound tier of the
-    text being embedded (callers compute it the same way as for
-    chat requests). ``is_query`` distinguishes a single-query embed
-    (retrieval-side) from a document-batch embed (index-side) —
-    today purely for accounting / debugging; per-mode prefixing
-    lives inside the provider.
-
-    sensitivity_tier: 1
-    """
-
-    sensitivity_tier: int
-    is_query: bool = False
-
-
-@dataclass(frozen=True)
-class EmbeddingEndpoint:
-    """A resolved embedding routing target.
-
-    Mirrors :class:`ProviderEndpoint` but for embedding providers.
-    ``requires_redaction`` follows the same rule as the chat
-    classify path: under ``remote-default``, tier 2+ text must pass
-    through :mod:`src.models.redactor` before egress.
-
-    sensitivity_tier: 1
-    """
-
-    provider: EmbeddingProviderName
-    reason: str = ""
-    requires_redaction: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -262,9 +179,9 @@ _CLASSIFIER_SAFE_LIST: frozenset[str] = frozenset({
 def _local_only_classifier() -> object | None:
     """Build a :class:`SensitivityClassifier` that always runs locally.
 
-    Used only under ``local-only`` mode — in ``remote-default`` mode
-    the redactor handles the high-signal entity removal and we don't
-    want to put Ollama on every prompt's hot path.
+    Used only under ``local-only`` mode — under ``remote-default`` we
+    don't want to put Ollama on every prompt's hot path just to
+    compute a tier that never changes the (always-local) route.
 
     sensitivity_tier: 1
     """
@@ -373,8 +290,9 @@ class EgressFirewall:
 
         The chosen tier is the maximum of those two and the keyword
         floor. The local-LLM tier classifier only runs under
-        ``local-only`` mode; in ``remote-default`` mode the redactor
-        scrubs entities post-decision instead.
+        ``local-only`` mode — it exists for audit-chain visibility
+        into how sensitive local traffic is, not to gate routing,
+        since every route already resolves locally.
 
         sensitivity_tier: 1
         """
@@ -404,15 +322,13 @@ class EgressFirewall:
             llm_tier or 0,
         )
         max_tier = max(1, min(3, max_tier))
-        route, reason, requires_redaction, requires_consent = (
-            self._route_for(max_tier, policy)
-        )
+        # OSS: every tier stays local regardless of policy.
+        route = "local"
+        reason = f"tier {max_tier} stays local (Arandu)"
         decision = EgressDecision(
             route=route,  # type: ignore[arg-type]
             max_tier=max_tier,
             reason=reason,
-            requires_redaction=requires_redaction,
-            requires_consent=requires_consent,
         )
         default_chain().append(
             event_type="egress_decision",
@@ -426,91 +342,9 @@ class EgressFirewall:
                 "agent_max_tier": agent_max_tier,
                 "explicit_tier": explicit_tier,
                 "llm_tier": llm_tier,
-                "requires_redaction": requires_redaction,
-                "requires_consent": requires_consent,
             },
         )
         return decision
-
-    def route_embedding(
-        self, req: EmbeddingRequest,
-    ) -> EmbeddingEndpoint:
-        """Resolve an embedding request to a provider endpoint.
-
-        Mirrors :meth:`route` for embeddings:
-
-        - ``local-only`` mode → always local Ollama, no redaction.
-        - ``remote-default`` mode → remote OpenAI (or compatible).
-          Tier 2+ text gets ``requires_redaction=True`` so the caller
-          knows to run :func:`src.models.redactor.redact_with_registry`
-          before sending to the remote endpoint.
-
-        Spend caps don't apply here — embedding costs are tiny vs.
-        chat (text-embedding-3-large ≈ $0.13 per 1M tokens) and there
-        is no per-lane lane categorisation for embeds yet.
-
-        sensitivity_tier: 1
-        """
-        if self.policy.routing == "local-only":
-            return EmbeddingEndpoint(
-                provider="local_ollama",
-                reason="local-only mode (user opt-in)",
-                requires_redaction=False,
-            )
-        tier = max(1, min(3, req.sensitivity_tier))
-        if tier <= 1:
-            return EmbeddingEndpoint(
-                provider="remote_openai",
-                reason="tier 1 embedding routed remote (remote-default)",
-                requires_redaction=False,
-            )
-        return EmbeddingEndpoint(
-            provider="remote_openai",
-            reason=(
-                f"tier {tier} embedding routed remote with "
-                "placeholder redaction (remote-default)"
-            ),
-            requires_redaction=True,
-        )
-
-    def route(self, req: AgentRequest) -> ProviderEndpoint:
-        """Resolve a lane/tier/complexity request to a provider endpoint.
-
-        Arandu routes every request to local Ollama regardless of
-        lane, tier, or complexity.
-
-        sensitivity_tier: 1
-        """
-        return ProviderEndpoint(
-            provider="local_ollama",
-            model=LOCAL_FALLBACK_MODEL,
-            lane=req.lane,
-            reason="Arandu: local-only",
-        )
-
-    def _route_for(
-        self,
-        max_tier: int,
-        policy: EgressPolicy,
-    ) -> tuple[str, str, bool, bool]:
-        """Return ``(route, reason, requires_redaction, requires_consent)``.
-
-        ``requires_redaction`` is True under ``remote-default`` for
-        Tier 2 and Tier 3 — prompts containing names/contacts/etc.
-        must pass through the persistent placeholder registry before
-        the remote provider sees them. ``requires_consent`` is always
-        False: the new model captures consent once during onboarding
-        rather than per-call.
-
-        sensitivity_tier: 1
-        """
-        # OSS: every tier stays local regardless of policy.
-        return (
-            "local",
-            f"tier {max_tier} stays local (Arandu)",
-            False,
-            False,
-        )
 
 
 _default_egress_firewall: EgressFirewall | None = None
@@ -544,17 +378,11 @@ def reset_egress_firewall_for_tests(
 
 
 __all__ = [
-    "AgentRequest",
     "ComplexityTier",
     "EgressFirewall",
     "EgressFirewallError",
     "EgressPolicy",
-    "EmbeddingEndpoint",
-    "EmbeddingProviderName",
-    "EmbeddingRequest",
     "Lane",
-    "ProviderEndpoint",
-    "ProviderName",
     "RoutingPolicy",
     "default_egress_firewall",
     "keyword_tier_floor",

@@ -96,20 +96,12 @@ class EgressDecision(AgentOutput):
     Routes a prompt to either the dedicated remote endpoint or the local
     fallback, based on the maximum sensitivity tier the prompt may carry.
 
-    ``requires_redaction`` is set when a Tier 3 prompt has been
-    explicitly opted into remote delivery under the "redact-then-remote"
-    path — the gateway must run :func:`src.models.redactor.redact`
-    before forwarding. ``requires_consent`` signals that a one-shot
-    user-facing dialog must accept the call before egress.
-
     sensitivity_tier: 1
     """
 
     route: Literal["remote", "local", "blocked"]
     max_tier: int = Field(ge=1, le=3)
     reason: str = ""
-    requires_redaction: bool = False
-    requires_consent: bool = False
 
 
 # ---------------------------------------------------------------------------
