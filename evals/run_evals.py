@@ -34,6 +34,7 @@ from pydantic_evals import Dataset
 from evals.evaluators import (
     ConfidenceInRange,
     ContainsIds,
+    DelegatedTo,
     EmotionalLabelStructural,
     FactSetMatches,
     FieldContains,
@@ -57,6 +58,7 @@ DATASETS_DIR = Path(__file__).parent / "datasets"
 CUSTOM_EVALUATORS = (
     ConfidenceInRange,
     ContainsIds,
+    DelegatedTo,
     EmotionalLabelStructural,
     FactSetMatches,
     FieldContains,

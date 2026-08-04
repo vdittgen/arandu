@@ -1,0 +1,208 @@
+# Task-proposer eval suite.
+#
+# Proposes tasks from a batch of recent messages. Structural checks
+# enforce the schema contract: cap (<= 6), category vocabulary,
+# importance range, and grounding of ``source_message_ids`` in the
+# supplied batch. The LLM judge grades the two judgement calls the
+# agent actually gets wrong in production:
+#
+#   1. task vs pending reply  — "what did you think?" is NOT a task
+#   2. who owes what          — the task must name the right person,
+#                               and must not silently swap in another
+#                               participant from the same thread
+#
+# Cases deliberately include near-miss names (Ana / Mariana, Bruno /
+# Brunela) so a model that pattern-matches on a name prefix fails.
+#
+# sensitivity_tier: N/A
+
+cases:
+  # ---------------------------------------------------------------
+  # 1. Plain extraction: one explicit ask with a deadline.
+  # ---------------------------------------------------------------
+  - name: explicit_ask_with_deadline
+    inputs:
+      messages:
+        - id: m1
+          sender_name: Mara
+          content: >
+            Can you send me the clinic budget spreadsheet by Friday?
+            I need it before the board call.
+      topics: []
+      goals: []
+    expected_output:
+      ids: ["m1"]
+    evaluators:
+      - {ListLengthInRange: {field: tasks, min_n: 1, max_n: 2}}
+      - {FieldIn: {field: tasks.0.category, choices: ["personal", "life", "work"]}}
+      - {IntInRange: {field: tasks.0.importance, lo: 5, hi: 10}}
+      - {ContainsIds: {field: tasks, id_key: source_message_ids, expected_key: ids}}
+      - LLMJudgeOnField:
+          field: tasks
+          threshold: 7
+          rubric: >
+            Exactly one task, about sending the clinic budget
+            spreadsheet to Mara. The title starts with a verb and
+            names Mara (or "the budget"), never a different person.
+            due_at should reference the coming Friday, or be null —
+            an invented unrelated date scores 0-3. Proposing a
+            "reply to Mara" task scores 0-3.
+
+  # ---------------------------------------------------------------
+  # 2. Pure question -> pending reply, NOT a task. Empty is correct.
+  # ---------------------------------------------------------------
+  - name: question_is_not_a_task
+    inputs:
+      messages:
+        - id: m1
+          sender_name: Sandra
+          content: "What did you think of the new intake form?"
+        - id: m2
+          sender_name: Sandra
+          content: "Did you see the photos from Saturday?"
+      topics: []
+      goals: []
+    expected_output: null
+    evaluators:
+      - {ListLengthInRange: {field: tasks, min_n: 0, max_n: 0}}
+
+  # ---------------------------------------------------------------
+  # 3. Near-miss names: the ask comes from Mariana, and Ana is only
+  #    mentioned as a bystander. The task must be owed to Mariana.
+  #    This is the contact-confusion case in prompt form.
+  # ---------------------------------------------------------------
+  - name: near_miss_names_right_owner
+    inputs:
+      messages:
+        - id: m1
+          sender_name: Mariana
+          content: >
+            Please send me the signed lease today — Ana already
+            forwarded her copy, so mine is the only one missing.
+      topics: []
+      goals: []
+    expected_output:
+      ids: ["m1"]
+    evaluators:
+      - {ListLengthInRange: {field: tasks, min_n: 1, max_n: 2}}
+      - {ContainsIds: {field: tasks, id_key: source_message_ids, expected_key: ids}}
+      - LLMJudgeOnField:
+          field: tasks
+          threshold: 7
+          rubric: >
+            One task about sending the signed lease to MARIANA.
+            Naming Ana as the recipient is the specific failure this
+            case exists to catch and scores 0. Mentioning Ana only as
+            context ("Ana already sent hers") is acceptable. A task
+            addressed to no one in particular scores 4-6.
+
+  # ---------------------------------------------------------------
+  # 4. Group chatter + one real ask. Must not task the chatter.
+  # ---------------------------------------------------------------
+  - name: noise_with_one_real_ask
+    inputs:
+      messages:
+        - id: m1
+          sender_name: Bruno
+          content: "hahaha that meme is perfect"
+        - id: m2
+          sender_name: Brunela
+          content: "😂😂"
+        - id: m3
+          sender_name: Bruno
+          content: >
+            serious note — someone needs to book the venue deposit
+            for the offsite before the 15th or we lose the slot
+        - id: m4
+          sender_name: Brunela
+          content: "who's bringing snacks"
+      topics: []
+      goals: []
+    expected_output:
+      ids: ["m3"]
+    evaluators:
+      - {ListLengthInRange: {field: tasks, min_n: 1, max_n: 2}}
+      - {ContainsIds: {field: tasks, id_key: source_message_ids, expected_key: ids}}
+      - LLMJudgeOnField:
+          field: tasks
+          threshold: 7
+          rubric: >
+            One task about booking / paying the offsite venue deposit
+            before the 15th. Tasks derived from the meme messages or
+            "who's bringing snacks" score 0-3. Attributing the venue
+            ask to Brunela instead of Bruno scores 0-3.
+
+  # ---------------------------------------------------------------
+  # 5. Goal linkage: an active goal is supplied and the task serves it.
+  # ---------------------------------------------------------------
+  - name: links_task_to_active_goal
+    inputs:
+      messages:
+        - id: m1
+          sender_name: Sandra
+          content: >
+            The psychologist candidate asked for a reference check
+            before she'll accept — can you call her last employer
+            this week?
+      topics:
+        - {name: "hiring psychologist", contact: "Mara"}
+      goals:
+        - {title: "Fully staff the clinic by August", category: "work"}
+      expected_goal: "Fully staff the clinic by August"
+    expected_output:
+      ids: ["m1"]
+    evaluators:
+      - {ListLengthInRange: {field: tasks, min_n: 1, max_n: 2}}
+      - {ContainsIds: {field: tasks, id_key: source_message_ids, expected_key: ids}}
+      - {FieldEquals: {field: tasks.0.parent_goal_hint, value: "Fully staff the clinic by August"}}
+      - LLMJudgeOnField:
+          field: tasks
+          threshold: 7
+          rubric: >
+            One task about doing a reference check / calling the
+            candidate's previous employer, categorised "work".
+            parent_goal_hint must be the supplied clinic staffing
+            goal — inventing a goal title that was not supplied
+            scores 0.
+
+  # ---------------------------------------------------------------
+  # 6. Automated notification: no task, no hallucinated follow-up.
+  # ---------------------------------------------------------------
+  - name: automated_notification_ignored
+    inputs:
+      messages:
+        - id: m1
+          sender_name: "Banco Itau"
+          content: >
+            Your statement for June is available. Do not reply to
+            this message.
+        - id: m2
+          sender_name: "NPS Survey"
+          content: "How likely are you to recommend us? Reply 0-10."
+      topics: []
+      goals: []
+    expected_output: null
+    evaluators:
+      - {ListLengthInRange: {field: tasks, min_n: 0, max_n: 0}}
+
+  # ---------------------------------------------------------------
+  # 7. Cap enforcement: many asks, at most 6 tasks.
+  # ---------------------------------------------------------------
+  - name: respects_six_task_cap
+    inputs:
+      messages:
+        - {id: m1, sender_name: Mara, content: "send the budget"}
+        - {id: m2, sender_name: Mara, content: "book the flights"}
+        - {id: m3, sender_name: Mara, content: "renew the insurance"}
+        - {id: m4, sender_name: Mara, content: "sign the lease"}
+        - {id: m5, sender_name: Mara, content: "order the chairs"}
+        - {id: m6, sender_name: Mara, content: "call the accountant"}
+        - {id: m7, sender_name: Mara, content: "update the website"}
+        - {id: m8, sender_name: Mara, content: "pay the electricity bill"}
+      topics: []
+      goals: []
+    expected_output: null
+    evaluators:
+      - {ListLengthInRange: {field: tasks, min_n: 1, max_n: 6}}
+      - {FieldNotEmpty: {field: tasks.0.title}}
+      - {FieldNotEmpty: {field: tasks.0.reason}}

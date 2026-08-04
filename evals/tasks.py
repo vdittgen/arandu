@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any
 
 from src.agents.actionable_events import ActionableEventsAgent
@@ -41,9 +42,18 @@ from src.agents.query_router import QueryRouterAgent
 from src.agents.relationship_tracker import RelationshipTrackerAgent
 from src.agents.schema_discovery import SchemaDiscoveryAgent
 from src.agents.sensitivity import SensitivityAgent
+from src.agents.task_proposer import TaskProposerAgent
 from src.agents.topic_extractor import TopicExtractorAgent
 from src.agents.triage import TriageAgent, TriageMessage
 from src.agents.weekly_digest import WeeklyDigestAgent
+
+# Per-case sink for orchestrator delegations, set by
+# :func:`task_curator_task` around each case. A ContextVar (not a plain
+# list) because ``Dataset.evaluate_sync`` runs cases concurrently and
+# each needs its own record of which sub-agent the router chose.
+_CURATOR_DELEGATIONS: ContextVar[list[str] | None] = ContextVar(
+    "_CURATOR_DELEGATIONS", default=None,
+)
 
 
 class ModelUnavailableError(RuntimeError):
@@ -515,6 +525,134 @@ def habit_suggester_task() -> Callable[[dict[str, Any]], Any]:
     return task
 
 
+def task_proposer_task() -> Callable[[dict[str, Any]], Any]:
+    """Propose tasks from a batch of recent messages.
+
+    Inputs accept the same shape as :class:`TaskProposerDeps`:
+    ``messages`` (required), ``topics`` and ``goals`` (optional).
+
+    sensitivity_tier: N/A
+    """
+    agent = TaskProposerAgent()
+
+    def task(inputs: dict[str, Any]) -> Any:
+        out = agent.propose(
+            messages=inputs.get("messages", []),
+            topics=inputs.get("topics", []),
+            goals=inputs.get("goals", []),
+        )
+        _raise_if_missing(out, "task_proposer")
+        return out
+
+    return task
+
+
+def task_curator_task() -> Callable[[dict[str, Any]], Any]:
+    """Route a task/goal/schedule request to the right sub-agent.
+
+    This suite grades *routing*, not the sub-agents' own output, so the
+    five children are swapped for stubs. Without that, one routing row
+    fans out into a real goal-extractor / scheduler LLM call — slow,
+    costly, and it would grade the child rather than the router.
+
+    Each stub records its ``agent_id`` when invoked; the recorded list
+    is returned alongside the curator's answer as
+    ``{"answer": ..., "delegated": [...]}`` for
+    :class:`~evals.evaluators.DelegatedTo`.
+
+    Concurrency: ``Dataset.evaluate_sync`` runs cases in parallel, so
+    the stubs are installed **once** here rather than swapped in and out
+    around each case, and each case's delegations are collected through
+    a :class:`~contextvars.ContextVar`. Swapping per case raced — one
+    case restored the real definitions while another was mid-run, so
+    delegations went unrecorded or landed in a neighbouring case's list
+    and every row scored as "delegated to nobody".
+
+    sensitivity_tier: N/A
+    """
+    import dataclasses
+
+    from src.agents.core.registry import (
+        get_agent,
+        register_agent,
+        unregister_agent,
+    )
+    from src.agents.daily_scheduler import register_daily_scheduler_agent
+    from src.agents.goal_extractor import register_goal_extractor_agent
+    from src.agents.habit_suggester import register_habit_suggester_agent
+    from src.agents.task_completion import register_task_completion_agent
+    from src.agents.task_curator import (
+        TaskCuratorAgent,
+        register_task_curator_agent,
+    )
+    from src.agents.task_proposer import register_task_proposer_agent
+
+    # The registry is empty in a bare eval process — nothing imports
+    # ``register_brain_v2`` here. Register just this orchestrator's
+    # family (each call is idempotent) so the delegation tools resolve
+    # to real definitions we can clone into stubs. Without this every
+    # tool returns "sub-agent unavailable" and the router flails
+    # against dead tools instead of being graded on its choice.
+    register_goal_extractor_agent()
+    register_task_proposer_agent()
+    register_task_completion_agent()
+    register_daily_scheduler_agent()
+    register_habit_suggester_agent()
+    register_task_curator_agent()
+
+    agent = TaskCuratorAgent()
+
+    def _stub_definition(original: Any, child_id: str) -> Any:
+        """Clone ``original`` with a factory that only records the call.
+
+        The delegation wrapper only calls ``record.output.model_dump_json()``
+        on whatever the child returns, so a duck-typed stand-in is enough
+        — and avoids having to satisfy each child's real output schema.
+        """
+
+        class _StubOutput:
+            @staticmethod
+            def model_dump_json() -> str:
+                return json.dumps({"stub": child_id, "result": "ok"})
+
+        class _StubRecord:
+            error = None
+            output = _StubOutput()
+
+        class _Stub:
+            agent_id = child_id
+
+            def run(self, _prompt: Any) -> Any:
+                sink = _CURATOR_DELEGATIONS.get()
+                if sink is not None:
+                    sink.append(child_id)
+                return _StubRecord()
+
+        return dataclasses.replace(original, factory=_Stub)
+
+    for child_id in agent.subagents:
+        existing = get_agent(child_id)
+        if existing is not None:
+            unregister_agent(child_id)
+            register_agent(_stub_definition(existing, child_id))
+
+    def task(inputs: dict[str, Any]) -> Any:
+        delegated: list[str] = []
+        token = _CURATOR_DELEGATIONS.set(delegated)
+        try:
+            record = agent.run(str(inputs.get("question", "")))
+        finally:
+            _CURATOR_DELEGATIONS.reset(token)
+
+        _raise_if_missing(record.output, "task_curator")
+        return {
+            "answer": getattr(record.output, "answer", ""),
+            "delegated": delegated,
+        }
+
+    return task
+
+
 def model_generator_task() -> Callable[[dict[str, Any]], Any]:
     """Generate a SQLMesh model from a discovered schema.
 
@@ -876,6 +1014,8 @@ TASK_REGISTRY: dict[str, Callable[[], Callable[[Any], Any]]] = {
     # Goals + habits planner
     "goal_extractor.yaml": goal_extractor_task,
     "habit_suggester.yaml": habit_suggester_task,
+    "task_proposer.yaml": task_proposer_task,
+    "task_curator.yaml": task_curator_task,
 }
 
 
@@ -904,6 +1044,8 @@ __all__ = [
     "relationship_tracker_task",
     "schema_discovery_task",
     "sensitivity_task",
+    "task_curator_task",
+    "task_proposer_task",
     "topic_extractor_task",
     "triage_task",
     "user_agent_task",
