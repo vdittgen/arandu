@@ -48,16 +48,15 @@ pub fn user_venv_python() -> Option<PathBuf> {
     user_venv_dir().map(|v| v.join("bin").join("python3"))
 }
 
-/// True if the user's venv exists AND the setup-complete marker was
-/// written by THIS app version.
+/// True if the user's venv exists AND the setup-complete marker matches
+/// the Python payload this bundle would install.
 ///
-/// The marker is written by `setup_venv` (with the app version as its
-/// content) only after `pip install` succeeds, so a partially-created
-/// venv from a crashed setup won't be falsely accepted. Comparing the
-/// content — not just existence — makes app updates rebuild the venv:
-/// the updater replaces the .app, but the Python code lives in
-/// `~/.arandu/venv`, and without the version check an updated install
-/// would keep executing the previous version's Python forever.
+/// The marker is written by `setup_venv` only after `pip install`
+/// succeeds, so a partially-created venv from a crashed setup won't be
+/// falsely accepted. Comparing the content — not just existence — makes
+/// app updates rebuild the venv: the updater replaces the .app, but the
+/// Python code lives in `~/.arandu/venv`, and without this an updated
+/// install would keep executing the previous build's Python forever.
 pub fn is_venv_ready() -> bool {
     let py = match user_venv_python() {
         Some(p) => p,
@@ -76,11 +75,97 @@ pub fn is_venv_ready() -> bool {
     }
 }
 
-/// Whether a setup-complete marker's content matches this app version.
-/// Stale (other-version), empty, or unreadable markers all mean the
-/// venv must be rebuilt; `setup_venv` wipes and recreates it.
+/// Whether a setup-complete marker matches what this bundle would
+/// install. Stale, empty, and unreadable markers all mean the venv must
+/// be rebuilt; `setup_venv` wipes and recreates it.
 fn marker_is_current(contents: &str) -> bool {
-    contents.trim() == env!("CARGO_PKG_VERSION")
+    contents.trim() == expected_marker()
+}
+
+/// The value a freshly-completed setup should record in its marker.
+///
+/// Prefers a fingerprint of the bundled Python payload, falling back to
+/// the app version when nothing is bundled (dev mode, or an unreadable
+/// Resources dir).
+pub fn expected_marker() -> String {
+    payload_fingerprint().unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+/// Fingerprint of the Python payload this bundle installs into the venv.
+///
+/// The marker used to hold the app *version*, which misses the case it
+/// exists to catch: Python changing **within** a version. A rebuild that
+/// fixes Python but keeps the version number leaves every existing
+/// install running the old code — setup sees a matching marker, skips,
+/// and the stale venv survives reinstalls indefinitely. Nothing surfaces
+/// it, because the Rust and UI halves *do* update.
+///
+/// Hashes each payload file's path, size and mtime rather than its
+/// contents: equally sensitive to a payload that actually changed, at a
+/// fraction of the cost (~2.8k files, tens of milliseconds, once per
+/// launch, gating a multi-minute rebuild).
+///
+/// Because mtimes move when a bundle is copied, reinstalling the *same*
+/// build also rebuilds the venv. That is the deliberate direction to err
+/// in: a redundant rebuild costs minutes, while a missed one leaves the
+/// app silently running last build's Python.
+///
+/// `python_runtime/` is skipped — it is large, static, and only moves
+/// with a release, which the version component already covers. The app
+/// version is mixed in so a version bump alone still invalidates.
+///
+/// Returns `None` when nothing is bundled (dev mode).
+fn payload_fingerprint() -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let resources = bundle_resources_dir()?;
+    let mut entries: Vec<String> = Vec::new();
+    collect_payload_entries(&resources, &resources, &mut entries).ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+    // Directory order is not guaranteed across filesystems; sort so the
+    // same payload always hashes identically.
+    entries.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    for entry in &entries {
+        hasher.update(entry.as_bytes());
+        hasher.update(b"\n");
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+/// Recursively record `relative_path:size:mtime` for every payload file.
+fn collect_payload_entries(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        // The interpreter is deliberately out of scope — see
+        // `payload_fingerprint`.
+        if path.file_name().is_some_and(|n| n == "python_runtime") {
+            continue;
+        }
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            collect_payload_entries(root, &path, out)?;
+        } else if meta.is_file() {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            out.push(format!("{}:{}:{}", rel.display(), meta.len(), mtime));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve the Python executable.
@@ -469,22 +554,103 @@ mod tests {
     }
 
     #[test]
-    fn test_marker_is_current_accepts_this_version() {
-        assert!(marker_is_current(env!("CARGO_PKG_VERSION")));
+    fn test_marker_matching_expected_is_current() {
+        assert!(marker_is_current(&expected_marker()));
         // Tolerate a trailing newline from manual writes.
-        assert!(marker_is_current(&format!(
-            "{}\n",
-            env!("CARGO_PKG_VERSION")
-        )));
+        assert!(marker_is_current(&format!("{}\n", expected_marker())));
     }
 
     #[test]
-    fn test_marker_from_another_version_is_stale() {
-        // A venv built by a previous (or future) app version must read
-        // as not-ready so updates rebuild it.
+    fn test_marker_from_another_build_is_stale() {
+        // A venv built by a previous (or future) build must read as
+        // not-ready so updates rebuild it.
         assert!(!marker_is_current("0.0.1-previous"));
         assert!(!marker_is_current(""));
         assert!(!marker_is_current("   "));
+    }
+
+    #[test]
+    fn test_expected_marker_falls_back_to_version_unbundled() {
+        // Nothing is bundled under `cargo test`, so the fallback is what
+        // dev builds record — and it must be stable, not empty.
+        assert_eq!(expected_marker(), env!("CARGO_PKG_VERSION"));
+    }
+
+    /// Scratch dir helper — avoids taking a `tempfile` dev-dependency
+    /// for three tests.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("arandu-fp-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn test_payload_entries_track_content_changes() {
+        // The regression this whole mechanism exists for: Python changed
+        // but the app version did not. Keying the marker on the version
+        // alone left every existing install running the old code, since
+        // setup saw a matching marker and skipped. A changed payload must
+        // produce a different manifest even with the version untouched.
+        let root = scratch("content");
+        std::fs::write(root.join("mod.py"), "print('v1')").unwrap();
+
+        let mut before = Vec::new();
+        collect_payload_entries(&root, &root, &mut before).unwrap();
+
+        // Longer body => different size => different entry.
+        std::fs::write(root.join("mod.py"), "print('v2 is longer')").unwrap();
+        let mut after = Vec::new();
+        collect_payload_entries(&root, &root, &mut after).unwrap();
+
+        assert_eq!(before.len(), 1);
+        assert_ne!(before, after, "a changed payload must change the manifest");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_payload_entries_recurse_and_skip_python_runtime() {
+        let root = scratch("skip");
+        std::fs::create_dir_all(root.join("arandu_app/src")).unwrap();
+        std::fs::write(root.join("arandu_app/src/deep.py"), "x").unwrap();
+        // The interpreter is huge, static, and versioned with releases —
+        // walking it every launch buys nothing.
+        std::fs::create_dir_all(root.join("python_runtime/bin")).unwrap();
+        std::fs::write(root.join("python_runtime/bin/python3"), "elf").unwrap();
+
+        let mut entries = Vec::new();
+        collect_payload_entries(&root, &root, &mut entries).unwrap();
+
+        assert_eq!(entries.len(), 1, "expected only the nested payload file");
+        assert!(entries[0].starts_with("arandu_app/src/deep.py:"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_payload_entries_are_relative_and_sortable() {
+        // Paths must be bundle-relative: an absolute path would embed the
+        // install location, so the same build would fingerprint
+        // differently from /Applications vs a test copy.
+        let root = scratch("relative");
+        std::fs::write(root.join("b.py"), "b").unwrap();
+        std::fs::write(root.join("a.py"), "a").unwrap();
+
+        let mut entries = Vec::new();
+        collect_payload_entries(&root, &root, &mut entries).unwrap();
+        entries.sort_unstable();
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].starts_with("a.py:"), "got {:?}", entries[0]);
+        assert!(entries[1].starts_with("b.py:"), "got {:?}", entries[1]);
+        assert!(
+            !entries.iter().any(|e| e.contains(root.to_str().unwrap())),
+            "entries must not embed the absolute install path",
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

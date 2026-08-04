@@ -1,14 +1,18 @@
 # Egress firewall eval suite (locked agent, manual-only).
 #
 # Inputs carry the prompt + the calling agent's max_tier; the firewall
-# returns an EgressDecision (route in {remote, local}, plus
-# requires_redaction / requires_consent booleans). The suite runs
-# entirely offline — the firewall is rule-based.
+# returns an EgressDecision (route in {remote, local, blocked} plus the
+# resolved max_tier). The suite runs entirely offline — the firewall is
+# rule-based.
 #
-# In Arandu every prompt routes to the local Ollama backend
-# regardless of tier, and nothing is redacted because nothing leaves
-# the device. Tier classification is still asserted since it drives
-# the audit log.
+# In Arandu every prompt routes to the local Ollama backend regardless
+# of tier, and nothing egresses. Tier classification is still asserted
+# since it drives the audit log.
+#
+# The `requires_redaction` / `requires_consent` fields these cases used
+# to assert were removed with the dead tier-routing seam: they were
+# hardcoded false and read by nothing. Route + tier are the decision's
+# whole observable surface now.
 #
 # sensitivity_tier: N/A
 
@@ -20,7 +24,6 @@ cases:
     expected_output: null
     evaluators:
       - {FieldEquals: {field: route, value: local}}
-      - {FieldEquals: {field: requires_redaction, value: false}}
       - {IntInRange: {field: max_tier, lo: 1, hi: 1}}
 
   - name: tier2_routes_local
@@ -30,7 +33,7 @@ cases:
     expected_output: null
     evaluators:
       - {FieldEquals: {field: route, value: local}}
-      - {FieldEquals: {field: requires_redaction, value: false}}
+      - {IntInRange: {field: max_tier, lo: 2, hi: 2}}
 
   - name: tier3_health_routes_local
     inputs:
@@ -39,7 +42,6 @@ cases:
     expected_output: null
     evaluators:
       - {FieldEquals: {field: route, value: local}}
-      - {FieldEquals: {field: requires_redaction, value: false}}
       - {IntInRange: {field: max_tier, lo: 3, hi: 3}}
 
   - name: tier3_finance_routes_local
@@ -49,7 +51,6 @@ cases:
     expected_output: null
     evaluators:
       - {FieldEquals: {field: route, value: local}}
-      - {FieldEquals: {field: requires_redaction, value: false}}
       - {IntInRange: {field: max_tier, lo: 3, hi: 3}}
 
 evaluators: []
