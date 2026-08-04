@@ -332,6 +332,38 @@ def _run_pa_with_reflection_sync(
     return _PA_EXECUTOR.submit(lambda: asyncio.run(_run())).result()
 
 
+def _output_spec_for(agent: Any) -> Any:
+    """Resolve the ``output_type`` to hand pydantic-ai for ``agent``.
+
+    Agents that delegate (orchestrators, deep agents) are pinned to
+    **tool-based** structured output; everyone else takes the model
+    profile's default.
+
+    Why: the Pro build switches cloud models to *native* structured
+    output, because the gateway honours ``response_format`` but ignores
+    ``tool_choice="required"``. Measured against DeepInfra with the same
+    prompt and tools, that switch also stops an orchestrator calling its
+    ``delegate_*`` tools at all — tool-mode routes a task request to
+    ``goal_extractor``, native-mode answers directly and delegates to
+    nobody, every time. A router that never reaches its sub-agents
+    silently produces no goals and no tasks.
+
+    Wrapping the output type in ``ToolOutput`` overrides the profile
+    default for these agents only, so single-shot agents keep the native
+    path the gateway needs.
+
+    sensitivity_tier: 1
+    """
+    output_type = agent.output_type
+    if not getattr(agent, "delegates", False):
+        return output_type
+    try:
+        from pydantic_ai import ToolOutput  # type: ignore
+    except ImportError:  # pragma: no cover - older pydantic-ai
+        return output_type
+    return ToolOutput(output_type)
+
+
 def _model_settings_for(model: Any) -> dict[str, Any] | None:
     """Per-model pydantic-ai settings to disable hidden reasoning chains.
 
@@ -524,6 +556,10 @@ class SBAgent(Generic[DepsT, OutT]):
     Subclasses MUST override :meth:`build_prompt` to convert their typed
     deps into a user-message string. Tool registration happens in
     :meth:`register_tools` (default: no tools).
+
+    ``delegates`` marks the subclasses whose tools invoke other agents.
+    Those are pinned to tool-based structured output — see
+    :func:`_output_spec_for`.
 
     The actual ``pydantic_ai.Agent`` instance is built lazily on first
     :meth:`run` call so tests can construct a subclass without
@@ -781,7 +817,7 @@ class SBAgent(Generic[DepsT, OutT]):
         effective_prompt = self._resolve_system_prompt()
         agent_kwargs: dict[str, Any] = {
             "model": model,
-            "output_type": self.output_type,
+            "output_type": _output_spec_for(self),
             "system_prompt": effective_prompt,
         }
         settings = _model_settings_for(model)
@@ -813,6 +849,7 @@ class SBOrchestrator(SBAgent[DepsT, OutT]):
     sensitivity_tier: varies
     """
 
+    delegates = True
     subagents: tuple[str, ...] = ()
 
     def _event_sink(self) -> Callable[[dict[str, Any]], None] | None:
@@ -975,6 +1012,7 @@ class SBDeepAgent(SBAgent[DepsT, OutT]):
     sensitivity_tier: varies
     """
 
+    delegates = True
     max_steps: int = 50
     allowed_subagents: tuple[str, ...] = ()
     allow_code_execution: bool = False
