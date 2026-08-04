@@ -587,6 +587,36 @@ class TestEntityExtraction:
         node_ids = [nid for _, nid in entities]
         assert "p-carlos" in node_ids
 
+    def test_short_name_not_matched_inside_longer_name(self) -> None:
+        """A name must not match as a substring of another name.
+
+        Regression: "ana" matched inside "Mariana", attaching the
+        wrong contact to tasks mined from the message.
+        """
+        name_index = {"ana": "p-ana", "mariana": "p-mariana"}
+        entities = extract_entities(
+            ["Can you send Mariana the deck?"], name_index,
+        )
+        node_ids = [nid for _, nid in entities]
+        assert node_ids == ["p-mariana"]
+
+    def test_name_not_matched_inside_ordinary_word(self) -> None:
+        """Regression: "ana" matched inside "analysis"/"banana"."""
+        name_index = {"ana": "p-ana"}
+        entities = extract_entities(
+            ["Finish the analysis and buy a banana"], name_index,
+        )
+        assert entities == []
+
+    def test_full_name_wins_over_bare_first_name(self) -> None:
+        """The most specific variant claims the mention."""
+        name_index = {"ana": "p-ana", "ana paula": "p-ana-paula"}
+        entities = extract_entities(
+            ["Ana Paula shared the roadmap"], name_index,
+        )
+        node_ids = [nid for _, nid in entities]
+        assert node_ids[0] == "p-ana-paula"
+
     def test_capitalized_word_matches_index(self) -> None:
         """Capitalized words matching the index should be found."""
         name_index = {"alice": "p-alice"}

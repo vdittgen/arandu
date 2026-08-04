@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from src.core.name_matching import find_names
+
 # ------------------------------------------------------------------
 # Data classes
 # ------------------------------------------------------------------
@@ -356,26 +358,24 @@ class QuestionPatternDetector:
         """Extract person names from a question.
 
         If *known_contacts* is provided, matches question text
-        against the contact list (case-insensitive substring).
-        Otherwise, falls back to extracting capitalized words
-        that are at least 3 characters long.
+        against the contact list on whole-word boundaries, longest
+        name first. Otherwise, falls back to extracting capitalized
+        words that are at least 3 characters long.
 
         Args:
             question: Natural-language question text.
             known_contacts: Optional list of known contact names.
 
         Returns:
-            List of matched entity names (may be empty).
+            List of matched entity names (may be empty), most
+            specific match first.
 
         sensitivity_tier: 1
         """
         if known_contacts:
-            lower = question.lower()
-            return [
-                name
-                for name in known_contacts
-                if name.lower() in lower
-            ]
+            # Whole-word only: a plain substring test matches "Ana"
+            # inside "Mariana" and returns the wrong contact.
+            return find_names(list(known_contacts), question)
 
         # Fallback: extract capitalized words (skip sentence starts
         # by requiring at least 2 chars before the match or being
