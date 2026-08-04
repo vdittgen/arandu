@@ -19,8 +19,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::bridge::{
-    bundled_app_dir, bundled_python_runtime, is_bundled, is_venv_ready,
-    user_venv_dir, user_venv_python,
+    bundled_app_dir, bundled_python_runtime, expected_marker, is_bundled,
+    is_venv_ready, user_venv_dir, user_venv_python,
 };
 
 #[derive(Serialize, Clone)]
@@ -203,8 +203,11 @@ pub async fn run_first_launch_setup(app: AppHandle) -> Result<(), String> {
         return Err(msg);
     }
 
+    // Record what was actually installed, not just the version — see
+    // `bridge::expected_marker`. Written last, so a crashed setup leaves
+    // no marker and the next launch retries.
     let marker = venv_dir.join(".arandu_setup_complete");
-    std::fs::write(&marker, env!("CARGO_PKG_VERSION"))
+    std::fs::write(&marker, expected_marker())
         .map_err(|e| format!("write setup marker: {e}"))?;
 
     emit_done(&app, "Setup complete.");
