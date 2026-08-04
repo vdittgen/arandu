@@ -110,9 +110,11 @@ pub fn expected_marker() -> String {
 /// in: a redundant rebuild costs minutes, while a missed one leaves the
 /// app silently running last build's Python.
 ///
-/// `python_runtime/` is skipped — it is large, static, and only moves
-/// with a release, which the version component already covers. The app
-/// version is mixed in so a version bump alone still invalidates.
+/// Build artifacts are excluded — see `is_excluded_from_fingerprint`.
+/// Without that the fingerprint is *self-mutating*: pip builds in place,
+/// so every setup changes the payload it just measured and the venv
+/// rebuilds on every launch. The app version is mixed in so a version
+/// bump alone still invalidates.
 ///
 /// Returns `None` when nothing is bundled (dev mode).
 fn payload_fingerprint() -> Option<String> {
@@ -137,6 +139,26 @@ fn payload_fingerprint() -> Option<String> {
     Some(format!("{:x}", hasher.finalize()))
 }
 
+/// Names that must not contribute to the fingerprint.
+///
+/// `pip install <app_dir>` builds *in place*: it writes `build/`, an
+/// `.egg-info/`, and `__pycache__/` full of `.pyc` files into the very
+/// source tree we are fingerprinting. Counting those means setup
+/// mutates its own staleness signal — the marker written after an
+/// install never matches the payload seen on the next launch, so the
+/// venv rebuilds on every single start. Measured on a real bundle: one
+/// setup produced 51 `__pycache__` dirs and 173 `.pyc` files.
+///
+/// `python_runtime` is skipped for a different reason: size. It is
+/// large, static, and only moves with a release, which the version
+/// component of the fingerprint already covers.
+fn is_excluded_from_fingerprint(name: &str) -> bool {
+    matches!(name, "python_runtime" | "__pycache__" | "build" | ".DS_Store")
+        || name.ends_with(".egg-info")
+        || name.ends_with(".pyc")
+        || name.ends_with(".pyo")
+}
+
 /// Recursively record `relative_path:size:mtime` for every payload file.
 fn collect_payload_entries(
     root: &Path,
@@ -146,9 +168,11 @@ fn collect_payload_entries(
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        // The interpreter is deliberately out of scope — see
-        // `payload_fingerprint`.
-        if path.file_name().is_some_and(|n| n == "python_runtime") {
+        let excluded = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(is_excluded_from_fingerprint);
+        if excluded {
             continue;
         }
         let meta = entry.metadata()?;
@@ -606,6 +630,50 @@ mod tests {
 
         assert_eq!(before.len(), 1);
         assert_ne!(before, after, "a changed payload must change the manifest");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_pip_build_artifacts_do_not_change_the_manifest() {
+        // The rebuild-loop regression. `pip install <app_dir>` builds in
+        // place, writing build/, .egg-info/ and __pycache__/*.pyc into
+        // the source tree being fingerprinted. Counting those makes setup
+        // mutate its own staleness signal: the marker written after an
+        // install never matches the next launch's payload, so the venv
+        // rebuilds every single start. A real bundle produced 51
+        // __pycache__ dirs and 173 .pyc files from one setup.
+        let root = scratch("artifacts");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/app.py"), "print('hi')").unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[project]").unwrap();
+
+        let mut before = Vec::new();
+        collect_payload_entries(&root, &root, &mut before).unwrap();
+        before.sort_unstable();
+
+        // Now simulate what pip leaves behind.
+        std::fs::create_dir_all(root.join("src/__pycache__")).unwrap();
+        std::fs::write(
+            root.join("src/__pycache__/app.cpython-311.pyc"),
+            "bytecode",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("arandu.egg-info")).unwrap();
+        std::fs::write(root.join("arandu.egg-info/PKG-INFO"), "meta").unwrap();
+        std::fs::create_dir_all(root.join("build/lib")).unwrap();
+        std::fs::write(root.join("build/lib/app.py"), "copy").unwrap();
+        std::fs::write(root.join(".DS_Store"), "junk").unwrap();
+
+        let mut after = Vec::new();
+        collect_payload_entries(&root, &root, &mut after).unwrap();
+        after.sort_unstable();
+
+        assert_eq!(
+            before, after,
+            "install-time artifacts must not affect the fingerprint, or \
+             the venv rebuilds on every launch",
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
