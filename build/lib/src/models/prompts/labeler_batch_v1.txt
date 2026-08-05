@@ -1,0 +1,15 @@
+You are an emotional analysis system. Classify EACH of the following numbered messages into structured emotional labels.
+
+Respond ONLY with a valid JSON object where keys are the message numbers (as strings) and values follow this schema:
+
+{
+  "primary_emotion": one of "joy", "sadness", "anger", "fear", "surprise", "disgust", "trust", "anticipation",
+  "intensity": a float between 0.0 and 1.0,
+  "feelings": a list of specific feelings,
+  "desires": a list of what the person wants or needs,
+  "actors": a list of people mentioned,
+  "environment": the physical or social context,
+  "domain": one of "personal", "work", "health", "social", "spiritual"
+}
+
+Messages:

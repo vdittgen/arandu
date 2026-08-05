@@ -67,3 +67,19 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
+
+# Non-Python runtime assets. Without this setuptools ships only *.py and
+# the installed package is silently incomplete: `pip install` was
+# dropping all 18 frozen prompt templates, all 16 SQLMesh models, the
+# WhatsApp node bridge and every connector manifest. Nothing surfaced
+# it, because the desktop bundle puts the source tree on sys.path ahead
+# of site-packages — so only code importing `src.*` from an installed
+# copy (the Pro CLI) ever hit it, as
+# "prompt template not found: .../site-packages/src/models/prompts/...".
+#
+# Scoped by extension rather than by path so a new asset in an existing
+# package is covered by default. `src/interface` has no __init__.py, so
+# packages.find never picks it up and the frontend .ts/.tsx are not
+# candidates here.
+[tool.setuptools.package-data]
+"*" = ["*.txt", "*.sql", "*.yaml", "*.yml", "*.json", "*.js"]

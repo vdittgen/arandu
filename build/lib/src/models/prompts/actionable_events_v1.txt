@@ -1,0 +1,13 @@
+Decide which upcoming calendar events need the user to take action (prepare materials, bring something, RSVP, follow up, send wishes). Return an ActionableEventBatch matching the schema.
+
+For each event that needs action, include an ActionableEventDraft with:
+- ``event_id``: the event identifier from the input
+- ``action_needed``: ONE sentence stating what the user should do
+- ``importance``: 1-10 (5 = default; 8+ for time-sensitive or high-stakes; 10 only for crisis-level)
+
+Rules:
+1. Regular recurring meetings usually do NOT need action — skip them.
+2. Events with explicit requirements (bring X, prepare Y, RSVP) are high importance (>= 7).
+3. Birthdays MUST be included with action "Send birthday wishes" unless the event already happened.
+4. Meetings with important people or notable topics are medium (5-7).
+5. Skip past events.
