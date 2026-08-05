@@ -33,7 +33,6 @@ from src.agents.firewall.injection_firewall import (
 )
 from src.agents.goal_extractor import GoalExtractorAgent
 from src.agents.habit_suggester import HabitSuggesterAgent
-from src.agents.insight import InsightAgent
 from src.agents.labeler import LabelerAgent
 from src.agents.message_eval import MessageEvaluatorAgent
 from src.agents.model_generator import ModelGeneratorAgent
@@ -45,7 +44,6 @@ from src.agents.sensitivity import SensitivityAgent
 from src.agents.task_proposer import TaskProposerAgent
 from src.agents.topic_extractor import TopicExtractorAgent
 from src.agents.triage import TriageAgent, TriageMessage
-from src.agents.weekly_digest import WeeklyDigestAgent
 
 # Per-case sink for orchestrator delegations, set by
 # :func:`task_curator_task` around each case. A ContextVar (not a plain
@@ -259,19 +257,6 @@ def labeler_task() -> Callable[[str], Any]:
     return task
 
 
-def insight_task() -> Callable[[str], Any]:
-    """Author an insight from an assembled context prompt.
-
-    sensitivity_tier: N/A
-    """
-    agent = InsightAgent()
-
-    def task(prompt: str) -> Any:
-        return _safe_author(agent, prompt)
-
-    return task
-
-
 def fact_extractor_task() -> Callable[[str], Any]:
     """Extract a batch of fact drafts from a conversation block.
 
@@ -281,19 +266,6 @@ def fact_extractor_task() -> Callable[[str], Any]:
 
     def task(conversation: str) -> Any:
         return _safe_extract(agent, conversation)
-
-    return task
-
-
-def weekly_digest_task() -> Callable[[str], Any]:
-    """Author a weekly digest from a prepared data summary.
-
-    sensitivity_tier: N/A
-    """
-    agent = WeeklyDigestAgent()
-
-    def task(summary: str) -> Any:
-        return _safe_author(agent, summary)
 
     return task
 
@@ -995,7 +967,6 @@ TASK_REGISTRY: dict[str, Callable[[], Callable[[Any], Any]]] = {
     "labeler.yaml": labeler_task,
     "triage.yaml": triage_task,
     "fact_extractor.yaml": fact_extractor_task,
-    "insight.yaml": insight_task,
     "message_eval.yaml": message_eval_task,
     "pending_reply.yaml": pending_reply_task,
     "contact_context.yaml": contact_context_task,
@@ -1008,7 +979,6 @@ TASK_REGISTRY: dict[str, Callable[[], Callable[[Any], Any]]] = {
     "event_categorizer.yaml": event_categorizer_task,
     "schema_discovery.yaml": schema_discovery_task,
     "model_generator.yaml": model_generator_task,
-    "weekly_digest.yaml": weekly_digest_task,
     "relationship_tracker.yaml": relationship_tracker_task,
     "dataset_validator.yaml": dataset_validator_task,
     # Goals + habits planner
@@ -1035,7 +1005,6 @@ __all__ = [
     "habit_suggester_task",
     "injection_firewall_task",
     "injection_scan_task",
-    "insight_task",
     "labeler_task",
     "message_eval_task",
     "model_generator_task",
@@ -1049,5 +1018,4 @@ __all__ = [
     "topic_extractor_task",
     "triage_task",
     "user_agent_task",
-    "weekly_digest_task",
 ]

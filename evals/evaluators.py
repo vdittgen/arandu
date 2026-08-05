@@ -586,7 +586,7 @@ class LLMJudgeOnField(Evaluator):
     """Same as :class:`LLMJudgeOnReason` but for any field path.
 
     Use this for prose outputs like ``answer`` (BrainResponse),
-    ``content`` (InsightDraft), or ``nudge`` (RelationshipNudge).
+    or ``nudge`` (RelationshipNudge).
     ``field`` may be dotted (``a.b.c``) to descend into nested models.
 
     sensitivity_tier: N/A

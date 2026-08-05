@@ -153,7 +153,6 @@ class BrainAgentV2(SBOrchestrator[BrainDepsV2, BrainResponse]):
         "labeler",
         "triage",
         "fact_extractor",
-        "insight",
         "message_evaluator",
         "pending_reply",
         "contact_context",
@@ -703,7 +702,6 @@ def bootstrap_agents(*, query_engine: QueryEngine | None = None) -> None:
     )
     from src.agents.goal_extractor import register_goal_extractor_agent
     from src.agents.habit_suggester import register_habit_suggester_agent
-    from src.agents.insight import register_insight_agent
     from src.agents.labeler import register_labeler_agent
     from src.agents.message_eval import (
         register_message_evaluator_agent,
@@ -733,9 +731,6 @@ def bootstrap_agents(*, query_engine: QueryEngine | None = None) -> None:
         register_topic_extractor_agent,
     )
     from src.agents.triage import register_triage_agent
-    from src.agents.weekly_digest import (
-        register_weekly_digest_agent,
-    )
 
     # Self-review checkpoint used by the reflective runner inside
     # Brain/Chat — registered first so the orchestrator instances can
@@ -748,7 +743,6 @@ def bootstrap_agents(*, query_engine: QueryEngine | None = None) -> None:
     register_labeler_agent()
     register_triage_agent()
     register_fact_extractor_agent()
-    register_insight_agent()
     register_message_evaluator_agent()
     register_pending_reply_agent()
     register_contact_context_agent()
@@ -769,7 +763,6 @@ def bootstrap_agents(*, query_engine: QueryEngine | None = None) -> None:
     register_event_categorizer_agent()
     register_schema_discovery_agent()
     register_model_generator_agent()
-    register_weekly_digest_agent()
     register_relationship_tracker_agent()
     # Locked firewall agents — appear in the registry so the Agents
     # page can render their cards + the manual "Run eval" button.

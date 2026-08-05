@@ -1,28 +1,22 @@
-"""Insight — SBAgent + DB persistence.
+"""Insight — DB persistence for proactive insight cards.
 
-:class:`InsightAgent` is the LLM authoring primitive (single-call
-SBAgent that produces user-facing prose); :class:`InsightGenerator`
-(re-exported from :mod:`.persistence`) keeps the orchestration logic
-— when to surface which insight, which domain, which trigger — and
-owns the ``_insights`` table.
+:class:`InsightGenerator` owns the orchestration logic — when to
+surface which insight, which domain, which trigger — and the
+``_insights`` table. It authors prose through :class:`BrainAgentV2`.
+
+The former ``InsightAgent`` SBAgent wrapper was removed: nothing but
+the eval adapter ever constructed it, and ``InsightGenerator`` never
+delegated to it.
 
 sensitivity_tier: 2
 """
 
-from src.agents.insight.agent import (
-    DEFAULT_SYSTEM_PROMPT,
-    InsightAgent,
-    register_insight_agent,
-)
 from src.agents.insight.persistence import (
     Insight,
     InsightGenerator,
 )
 
 __all__ = [
-    "DEFAULT_SYSTEM_PROMPT",
     "Insight",
-    "InsightAgent",
     "InsightGenerator",
-    "register_insight_agent",
 ]
