@@ -28,6 +28,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -144,9 +145,7 @@ SUITE_TO_AGENT: dict[str, str] = {
 }
 
 
-_REGISTRY_READY = False
-
-
+@lru_cache(maxsize=1)
 def _ensure_registry() -> None:
     """Populate the agent registry once per process.
 
@@ -155,18 +154,19 @@ def _ensure_registry() -> None:
     back ``None`` — the gate would never fire. ``bootstrap_agents`` is
     idempotent and makes no LLM calls.
 
+    ``lru_cache`` is the once-per-process latch: it also caches the
+    failure path, which is what we want — a registry that could not be
+    built will not build on the next call either, and retrying it per
+    suite would re-pay the import cost to reach the same ``None``.
+
     sensitivity_tier: 1
     """
-    global _REGISTRY_READY
-    if _REGISTRY_READY:
-        return
     try:
         from src.agents.brain.v2 import bootstrap_agents
 
         bootstrap_agents()
     except Exception:  # noqa: BLE001 - fingerprinting is best-effort
         logger.debug("agent registry bootstrap failed", exc_info=True)
-    _REGISTRY_READY = True
 
 
 def suite_fingerprint(suite: str, dataset_path: Path) -> str | None:
