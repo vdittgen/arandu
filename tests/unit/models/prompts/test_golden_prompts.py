@@ -120,16 +120,6 @@ REGISTRY: list[PromptCase] = [
         variable_input="Alice told Bob she is allergic to peanuts.",
     ),
     PromptCase(
-        name="weekly_digest",
-        lane="background",
-        template_filename="weekly_digest_v1.txt",
-        expected_hash="sha256:d472d1d5ed76c5c9b4e9e2ed6892a7e8e2e6164d48819f7f719a243d270c7a93",
-        fixture_filename="weekly_digest.golden.txt",
-        variable_input=(
-            "last 7 days: 12 messages, 3 meetings, 1 doctor appointment"
-        ),
-    ),
-    PromptCase(
         name="actionable_events",
         lane="escalation",
         template_filename="actionable_events_v1.txt",

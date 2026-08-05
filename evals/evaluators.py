@@ -358,6 +358,47 @@ class FieldEquals(Evaluator):
 
 
 @dataclass
+class DelegatedTo(Evaluator):
+    """Pass when an orchestrator delegated to exactly the right child.
+
+    Reads the ``delegated`` list an orchestrator task adapter records
+    (see :func:`evals.tasks.task_curator_task`) and compares it to
+    ``expected``. Routing to the right child *plus* extra children is
+    still a miss: each extra delegation is a wasted LLM call, and for
+    the curator it means the user waits on e.g. a scheduler run they
+    never asked for.
+
+    ``expected: []`` asserts the orchestrator answered directly without
+    delegating at all.
+
+    sensitivity_tier: N/A
+    """
+
+    expected: list[str] = dc_field(default_factory=list)
+
+    def evaluate(self, ctx: EvaluatorContext) -> EvaluationReason:
+        output = ctx.output
+        if not isinstance(output, dict) or "delegated" not in output:
+            return EvaluationReason(
+                value=False,
+                reason="output has no 'delegated' list",
+            )
+        actual = list(output["delegated"])
+        if actual == list(self.expected):
+            return EvaluationReason(
+                value=True,
+                reason=f"delegated to {actual or 'nobody'}",
+            )
+        return EvaluationReason(
+            value=False,
+            reason=(
+                f"delegated to {actual or 'nobody'}, "
+                f"expected {list(self.expected) or 'nobody'}"
+            ),
+        )
+
+
+@dataclass
 class FieldNotEmpty(Evaluator):
     """Pass when ``output.<field>`` is truthy (non-empty / non-zero).
 
@@ -545,7 +586,7 @@ class LLMJudgeOnField(Evaluator):
     """Same as :class:`LLMJudgeOnReason` but for any field path.
 
     Use this for prose outputs like ``answer`` (BrainResponse),
-    ``content`` (InsightDraft), or ``nudge`` (RelationshipNudge).
+    or ``nudge`` (RelationshipNudge).
     ``field`` may be dotted (``a.b.c``) to descend into nested models.
 
     sensitivity_tier: N/A
@@ -611,6 +652,12 @@ def _items_for_set_eval(
 def _ids_from_items(items: list[Any], id_key: str) -> set[str]:
     """Extract a set of string ids from records or dicts.
 
+    ``id_key`` may address either a single id (``message_id``) or a list
+    of them (``TaskProposalDraft.source_message_ids`` — one task can be
+    grounded in several messages). List values are flattened; without
+    that a ``["m1"]`` stringified to ``"['m1']"`` and never matched the
+    expected ``"m1"``.
+
     sensitivity_tier: N/A
     """
     found: set[str] = set()
@@ -620,7 +667,11 @@ def _ids_from_items(items: list[Any], id_key: str) -> set[str]:
             val = getattr(item, id_key)
         elif isinstance(item, dict):
             val = item.get(id_key)
-        if val is not None:
+        if val is None:
+            continue
+        if isinstance(val, (list, tuple, set)):
+            found.update(str(v) for v in val)
+        else:
             found.add(str(val))
     return found
 
@@ -792,6 +843,7 @@ def _close(a: float, b: float, tol: float = 1e-9) -> bool:  # pragma: no cover
 __all__ = [
     "ConfidenceInRange",
     "ContainsIds",
+    "DelegatedTo",
     "EmotionalLabelStructural",
     "FactSetMatches",
     "FieldContains",

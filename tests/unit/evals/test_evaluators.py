@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 from evals.evaluators import (
     ConfidenceInRange,
     ContainsIds,
+    DelegatedTo,
     EmotionalLabelStructural,
     FactSetMatches,
     FirewallAllowedMatches,
@@ -544,3 +545,97 @@ def test_llm_judge_on_field_wildcard_empty_list_is_missing(monkeypatch) -> None:
 
 # `MagicMock` is still used above
 _ = MagicMock
+
+
+# ---------------------------------------------------------------------------
+# DelegatedTo
+# ---------------------------------------------------------------------------
+
+
+def test_delegated_to_passes_on_exact_match() -> None:
+    ev = DelegatedTo(expected=["goal_extractor"])
+    out = ev.evaluate(
+        _ctx(output={"answer": "...", "delegated": ["goal_extractor"]}),
+    )
+    assert out.value is True
+
+
+def test_delegated_to_fails_on_wrong_child() -> None:
+    ev = DelegatedTo(expected=["task_proposer"])
+    out = ev.evaluate(
+        _ctx(output={"answer": "...", "delegated": ["daily_scheduler"]}),
+    )
+    assert out.value is False
+    assert "daily_scheduler" in out.reason
+
+
+def test_delegated_to_fails_when_nothing_was_called() -> None:
+    """The native-structured-output failure mode: router answers direct."""
+    ev = DelegatedTo(expected=["goal_extractor"])
+    out = ev.evaluate(_ctx(output={"answer": "...", "delegated": []}))
+    assert out.value is False
+    assert "nobody" in out.reason
+
+
+def test_delegated_to_rejects_over_delegation() -> None:
+    """Right child + a speculative extra is still a miss."""
+    ev = DelegatedTo(expected=["habit_suggester"])
+    out = ev.evaluate(
+        _ctx(
+            output={
+                "answer": "...",
+                "delegated": ["habit_suggester", "goal_extractor"],
+            },
+        ),
+    )
+    assert out.value is False
+
+
+def test_delegated_to_expects_no_delegation() -> None:
+    ev = DelegatedTo(expected=[])
+    out = ev.evaluate(_ctx(output={"answer": "...", "delegated": []}))
+    assert out.value is True
+
+
+def test_delegated_to_handles_non_orchestrator_output() -> None:
+    ev = DelegatedTo(expected=["goal_extractor"])
+    out = ev.evaluate(_ctx(output=SimpleNamespace(answer="hi")))
+    assert out.value is False
+    assert "delegated" in out.reason
+
+
+def test_contains_ids_flattens_list_valued_key() -> None:
+    """``source_message_ids`` is a list per record, not a scalar."""
+    ev = ContainsIds(field="tasks", id_key="source_message_ids")
+    out = ev.evaluate(
+        _ctx(
+            output={"tasks": [{"source_message_ids": ["m1", "m2"]}]},
+            expected={"ids": ["m1"]},
+        ),
+    )
+    assert out.value is True
+
+
+def test_contains_ids_still_handles_scalar_key() -> None:
+    # NB: not "items" as the field name — _resolve_attr tries hasattr()
+    # first, which on a dict output returns the bound dict.items method.
+    ev = ContainsIds(field="records", id_key="message_id")
+    out = ev.evaluate(
+        _ctx(
+            output={"records": [{"message_id": "m1"}]},
+            expected={"ids": ["m1"]},
+        ),
+    )
+    assert out.value is True
+
+
+def test_contains_ids_reports_missing_from_list_key() -> None:
+    ev = ContainsIds(field="tasks", id_key="source_message_ids")
+    out = ev.evaluate(
+        _ctx(
+            output={"tasks": [{"source_message_ids": ["m9"]}]},
+            expected={"ids": ["m1"]},
+        ),
+    )
+    assert out.value is False
+    assert "m1" in out.reason

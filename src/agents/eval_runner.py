@@ -21,12 +21,14 @@ sensitivity_tier: 1
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +55,6 @@ AGENT_SUITE_MAP: dict[str, str] = {
     "labeler": "labeler",
     "triage": "triage",
     "fact_extractor": "fact_extractor",
-    "insight": "insight",
     "message_evaluator": "message_eval",
     "pending_reply": "pending_reply",
     "contact_context": "contact_context",
@@ -63,7 +64,6 @@ AGENT_SUITE_MAP: dict[str, str] = {
     "topic_extractor": "topic_extractor",
     "schema_discovery": "schema_discovery",
     "model_generator": "model_generator",
-    "weekly_digest": "weekly_digest",
     "relationship_tracker": "relationship_tracker",
     "dataset_validator": "dataset_validator",
     "dataset_creator": "dataset_creator",
@@ -140,6 +140,94 @@ DEFAULT_DB_PATH = (
     Path.home() / ".arandu" / "data" / "arandu.sqlite3"
 )
 
+SUITE_TO_AGENT: dict[str, str] = {
+    suite: agent for agent, suite in AGENT_SUITE_MAP.items()
+}
+
+
+@lru_cache(maxsize=1)
+def _ensure_registry() -> None:
+    """Populate the agent registry once per process.
+
+    A bare ``python -m evals.run_evals`` imports nothing that registers
+    agents, so the registry is empty and every fingerprint would come
+    back ``None`` — the gate would never fire. ``bootstrap_agents`` is
+    idempotent and makes no LLM calls.
+
+    ``lru_cache`` is the once-per-process latch: it also caches the
+    failure path, which is what we want — a registry that could not be
+    built will not build on the next call either, and retrying it per
+    suite would re-pay the import cost to reach the same ``None``.
+
+    sensitivity_tier: 1
+    """
+    try:
+        from src.agents.brain.v2 import bootstrap_agents
+
+        bootstrap_agents()
+    except Exception:  # noqa: BLE001 - fingerprinting is best-effort
+        logger.debug("agent registry bootstrap failed", exc_info=True)
+
+
+def suite_fingerprint(suite: str, dataset_path: Path) -> str | None:
+    """Hash the three inputs that can change a suite's result.
+
+    Those are the **model** serving the agent, its **system prompt**,
+    and the **dataset**. If none moved, re-running spends tokens to
+    reproduce a known answer — a full run is ~480 LLM calls, and the
+    suite agents are exactly the ones on the premium tier.
+
+    Returns ``None`` when any input can't be resolved (no registry, no
+    config store, unreadable dataset). Callers must treat ``None`` as
+    "cannot prove it's unchanged" and run the suite.
+
+    sensitivity_tier: 1
+    """
+    agent_id = SUITE_TO_AGENT.get(suite)
+    if agent_id is None:
+        return None
+    try:
+        dataset = dataset_path.read_bytes()
+    except OSError:
+        return None
+    try:
+        from src.agents.core.config_store import current_model_override
+        from src.agents.core.registry import get_agent
+    except Exception:  # noqa: BLE001
+        return None
+
+    _ensure_registry()
+    definition = get_agent(agent_id)
+    if definition is None:
+        return None
+    prompt = definition.default_config.system_prompt or ""
+    try:
+        model = current_model_override(agent_id) or ""
+    except Exception:  # noqa: BLE001
+        model = ""
+    if not model:
+        # No per-agent override: the global model decides. Read it the
+        # same way the factory does so a provider switch invalidates.
+        try:
+            from src.agents.core.model_factory import _load_settings
+
+            settings = _load_settings()
+            model = "{}:{}".format(
+                settings.get("llm_provider", ""),
+                settings.get("llm_model", ""),
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    digest = hashlib.sha256()
+    digest.update(model.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(prompt.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(dataset)
+    return digest.hexdigest()
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agent_eval_runs (
     run_id              TEXT PRIMARY KEY,
@@ -153,7 +241,8 @@ CREATE TABLE IF NOT EXISTS agent_eval_runs (
     cases_passed        INTEGER NOT NULL DEFAULT 0,
     cases_failed        INTEGER NOT NULL DEFAULT 0,
     failed_cases_json   TEXT,
-    error               TEXT
+    error               TEXT,
+    fingerprint         TEXT
 )
 """
 
@@ -183,6 +272,17 @@ class EvalRunStore:
     def _ensure_schema(self) -> None:
         self._conn.execute(_SCHEMA)
         self._conn.execute(_INDEX)
+        # ``fingerprint`` post-dates the original table; add it in place
+        # for installs created before the skip-if-unchanged gate.
+        cols = {
+            r[1] for r in self._conn.execute(
+                "PRAGMA table_info(agent_eval_runs)",
+            )
+        }
+        if "fingerprint" not in cols:
+            self._conn.execute(
+                "ALTER TABLE agent_eval_runs ADD COLUMN fingerprint TEXT",
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -195,18 +295,44 @@ class EvalRunStore:
         agent_id: str,
         suite: str | None,
         trigger: str,
+        fingerprint: str | None = None,
     ) -> str:
         run_id = uuid.uuid4().hex
         started = _now_iso()
         self._conn.execute(
             """
             INSERT INTO agent_eval_runs (
-                run_id, agent_id, suite, trigger, started_at, status
-            ) VALUES (?, ?, ?, ?, ?, 'running')
+                run_id, agent_id, suite, trigger, started_at, status,
+                fingerprint
+            ) VALUES (?, ?, ?, ?, ?, 'running', ?)
             """,
-            (run_id, agent_id, suite, trigger, started),
+            (run_id, agent_id, suite, trigger, started, fingerprint),
         )
         return run_id
+
+    def has_passed_with(self, suite: str, fingerprint: str) -> bool:
+        """True when ``suite`` has ever passed on this exact fingerprint.
+
+        "Ever" rather than "most recently": the fingerprint pins the
+        model, the prompt and the dataset, so a suite that passed on
+        these inputs will pass on them again. Matching only the latest
+        run would re-spend on an A -> B -> A edit, where reverting is
+        the one case we can be surest about.
+
+        Only ``ok`` counts. A failed or errored run must never suppress
+        a re-run — seeing whether the failure persists is the point.
+
+        sensitivity_tier: 1
+        """
+        cur = self._conn.execute(
+            """
+            SELECT 1 FROM agent_eval_runs
+            WHERE suite = ? AND status = 'ok' AND fingerprint = ?
+            LIMIT 1
+            """,
+            (suite, fingerprint),
+        )
+        return cur.fetchone() is not None
 
     def finalize(
         self,
@@ -444,6 +570,8 @@ class _ModelUnavailable(RuntimeError):  # noqa: N818
 
 __all__ = [
     "AGENT_SUITE_MAP",
+    "SUITE_TO_AGENT",
+    "suite_fingerprint",
     "DEFAULT_DB_PATH",
     "EvalRun",
     "EvalRunStore",

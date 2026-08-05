@@ -34,6 +34,7 @@ from pydantic_evals import Dataset
 from evals.evaluators import (
     ConfidenceInRange,
     ContainsIds,
+    DelegatedTo,
     EmotionalLabelStructural,
     FactSetMatches,
     FieldContains,
@@ -57,6 +58,7 @@ DATASETS_DIR = Path(__file__).parent / "datasets"
 CUSTOM_EVALUATORS = (
     ConfidenceInRange,
     ContainsIds,
+    DelegatedTo,
     EmotionalLabelStructural,
     FactSetMatches,
     FieldContains,
@@ -118,6 +120,10 @@ def resolve_suites(spec: str) -> list[str]:
 class SuiteResult:
     """Summary of one suite's eval run.
 
+    ``skipped`` marks a suite the fingerprint gate short-circuited —
+    it did not run, and its counts are carried over from the last
+    successful run purely so totals stay readable.
+
     sensitivity_tier: N/A
     """
 
@@ -126,22 +132,92 @@ class SuiteResult:
     passed: int
     failed: int
     duration_s: float
+    skipped: bool = False
 
     @property
     def pass_rate(self) -> float:
         return self.passed / self.cases if self.cases else 0.0
 
 
-def run_suite(suite: str) -> SuiteResult:
+def run_suite(suite: str, *, force: bool = False) -> SuiteResult:
     """Run one suite and return the aggregate summary.
+
+    Skips the run when the model, system prompt and dataset are all
+    unchanged since the last successful run of this suite — a full
+    pass is ~480 LLM calls billed to the user's cloud balance, and
+    re-running an unchanged suite only reproduces a known answer. Pass
+    ``force=True`` (``--force`` on the CLI) to run regardless.
 
     sensitivity_tier: N/A
     """
-    total, passed, failed, _failed_cases, duration = _run_suite_internal(suite)
+    store, run_id, fingerprint = None, None, None
+    try:
+        from src.agents.eval_runner import EvalRunStore, suite_fingerprint
+
+        path = DATASETS_DIR / f"{suite}.yaml"
+        fingerprint = suite_fingerprint(suite, path)
+        store = EvalRunStore()
+        if not force and fingerprint is not None:
+            if store.has_passed_with(suite, fingerprint):
+                prior = _last_counts(store, suite)
+                logger.info(
+                    "skipping %s — model, prompt and dataset unchanged",
+                    suite,
+                )
+                store.close()
+                return SuiteResult(
+                    suite=suite, cases=prior[0], passed=prior[1],
+                    failed=prior[2], duration_s=0.0, skipped=True,
+                )
+        agent_id = _agent_for_suite(suite)
+        if agent_id is not None:
+            run_id = store.insert_pending(
+                agent_id=agent_id, suite=suite, trigger="cli",
+                fingerprint=fingerprint,
+            )
+    except Exception:  # noqa: BLE001 - the gate must never block a run
+        logger.debug("eval fingerprint gate unavailable", exc_info=True)
+
+    try:
+        total, passed, failed, failed_cases, duration = _run_suite_internal(
+            suite,
+        )
+    except Exception as exc:
+        if store is not None and run_id is not None:
+            store.finalize(run_id, status="error", error=str(exc))
+            store.close()
+        raise
+    if store is not None:
+        if run_id is not None:
+            store.finalize(
+                run_id,
+                # Only a clean pass may suppress the next run.
+                status="ok" if failed == 0 else "failed",
+                cases_total=total, cases_passed=passed,
+                cases_failed=failed, failed_cases=failed_cases,
+            )
+        store.close()
     return SuiteResult(
         suite=suite, cases=total, passed=passed,
         failed=failed, duration_s=duration,
     )
+
+
+def _agent_for_suite(suite: str) -> str | None:
+    from src.agents.eval_runner import SUITE_TO_AGENT
+
+    return SUITE_TO_AGENT.get(suite)
+
+
+def _last_counts(store: Any, suite: str) -> tuple[int, int, int]:
+    """Case counts from the last successful run, for the skipped row."""
+    agent_id = _agent_for_suite(suite)
+    if agent_id is None:
+        return (0, 0, 0)
+    prior = store.latest(agent_id)
+    if prior is None:
+        return (0, 0, 0)
+    return (prior.cases_total, prior.cases_passed, prior.cases_failed)
 
 
 def run_suite_detailed(
@@ -262,12 +338,14 @@ def run_dataset_detailed(
     )
 
 
-def run_suites(suites: list[str]) -> list[SuiteResult]:
+def run_suites(
+    suites: list[str], *, force: bool = False,
+) -> list[SuiteResult]:
     """Run multiple suites sequentially.
 
     sensitivity_tier: N/A
     """
-    return [run_suite(s) for s in suites]
+    return [run_suite(s, force=force) for s in suites]
 
 
 # ---------------------------------------------------------------------------
@@ -290,10 +368,11 @@ def _render_text(results: list[SuiteResult]) -> str:
         total_pass += r.passed
         total_fail += r.failed
         total_time += r.duration_s
+        marker = "  (skipped — unchanged)" if r.skipped else ""
         lines.append(
             f"{r.suite.ljust(width)} "
             f"{r.cases:>5}  {r.passed:>4}  {r.failed:>4}  "
-            f"{r.pass_rate*100:>5.1f}%  {r.duration_s:>6.2f}s",
+            f"{r.pass_rate*100:>5.1f}%  {r.duration_s:>6.2f}s{marker}",
         )
     lines.append("-" * (width + 36))
     overall = total_pass / total_cases if total_cases else 0.0
@@ -315,6 +394,7 @@ def _render_json(results: list[SuiteResult]) -> str:
                 "failed": r.failed,
                 "pass_rate": r.pass_rate,
                 "duration_s": r.duration_s,
+                "skipped": r.skipped,
             }
             for r in results
         ],
@@ -350,13 +430,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Emit a JSON report instead of the text table.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Run even when the model, prompt and dataset are unchanged "
+            "since the last successful run."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.list:
         for s in available_suites():
             print(s)
         return 0
     suites = resolve_suites(args.suite)
-    results = run_suites(suites)
+    results = run_suites(suites, force=args.force)
     output = _render_json(results) if args.json else _render_text(results)
     sys.stdout.write(output)
     sys.stdout.flush()

@@ -341,7 +341,6 @@ _EXPECTED_SUBAGENTS = (
     "labeler",
     "triage",
     "fact_extractor",
-    "insight",
     "message_evaluator",
     "pending_reply",
     "contact_context",
@@ -356,7 +355,6 @@ _EXPECTED_INDIRECT_AGENTS = (
     "topic_extractor",
     "schema_discovery",
     "model_generator",
-    "weekly_digest",
     "relationship_tracker",
 )
 

@@ -1,0 +1,101 @@
+# Task-curator eval suite.
+#
+# Grades ROUTING only. The five sub-agents are replaced with stubs by
+# ``evals.tasks.task_curator_task``, so a case costs one curator call
+# and never fans out into a real goal-extractor or scheduler run.
+#
+# ``DelegatedTo`` requires an exact match on the delegation list, so
+# over-delegating (right child + a speculative second one) fails. That
+# is deliberate: every extra hop is a paid LLM call the user waits on.
+#
+# The near-miss pairs here are the ones the router actually confuses —
+# goals vs tasks, "what should I do today" (scheduler) vs "what are my
+# tasks" (proposer), and completion vs proposal.
+#
+# sensitivity_tier: N/A
+
+cases:
+  - name: routes_goal_mining
+    inputs:
+      question: "What are my work goals right now?"
+    expected_output: null
+    evaluators:
+      - {DelegatedTo: {expected: ["goal_extractor"]}}
+
+  - name: routes_task_proposal_from_messages
+    inputs:
+      question: "Extract tasks from last week's messages."
+    expected_output: null
+    evaluators:
+      - {DelegatedTo: {expected: ["task_proposer"]}}
+
+  - name: routes_task_proposal_under_named_project
+    inputs:
+      question: "Create tasks for the clinic hiring project."
+    expected_output: null
+    evaluators:
+      - {DelegatedTo: {expected: ["task_proposer"]}}
+
+  - name: routes_completion_check
+    inputs:
+      question: "Did I finish anything from yesterday?"
+    expected_output: null
+    evaluators:
+      - {DelegatedTo: {expected: ["task_completion"]}}
+
+  - name: routes_daily_plan
+    inputs:
+      question: "What does my day look like tomorrow?"
+    expected_output: null
+    evaluators:
+      - {DelegatedTo: {expected: ["daily_scheduler"]}}
+
+  - name: routes_habit_suggestion
+    inputs:
+      question: "Suggest one daily habit for each of my goals."
+    expected_output: null
+    evaluators:
+      - {DelegatedTo: {expected: ["habit_suggester"]}}
+
+  # ---------------------------------------------------------------
+  # Near-miss: "what should I do today" is a SCHEDULE request, not a
+  # task-proposal request. Routing it to task_proposer mines new tasks
+  # from messages instead of planning the ones that already exist.
+  # ---------------------------------------------------------------
+  - name: today_plan_is_not_task_proposal
+    inputs:
+      question: "What should I work on today?"
+    expected_output: null
+    evaluators:
+      - {DelegatedTo: {expected: ["daily_scheduler"]}}
+
+  # ---------------------------------------------------------------
+  # Near-miss: a goal question that mentions the word "task".
+  # ---------------------------------------------------------------
+  - name: goal_question_mentioning_tasks
+    inputs:
+      question: >
+        Forget individual tasks for a second — what are the bigger
+        commitments I'm actually working toward this quarter?
+    expected_output: null
+    evaluators:
+      - {DelegatedTo: {expected: ["goal_extractor"]}}
+
+  # ---------------------------------------------------------------
+  # Exactly one hop: a compound-sounding question must not trigger
+  # two delegations.
+  # ---------------------------------------------------------------
+  - name: does_not_over_delegate
+    inputs:
+      question: "Give me a habit for each goal."
+    expected_output: null
+    evaluators:
+      - {DelegatedTo: {expected: ["habit_suggester"]}}
+      - LLMJudgeOnField:
+          field: answer
+          threshold: 6
+          rubric: >
+            A 2-4 sentence narration of the sub-agent's result. It
+            must not invent concrete habits, goals, or schedule slots
+            beyond what the stub returned — fabricated specifics
+            score 0-3.

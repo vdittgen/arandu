@@ -256,22 +256,6 @@ class Insight(AgentOutput):
     suggested_followup: str | None = None
 
 
-class DigestSummary(AgentOutput):
-    """Weekly digest output authored by ``WeeklyDigestAgent``.
-
-    Three named sections + an optional top-line highlight. Empty
-    strings render as omitted in the UI; the LLM is encouraged to
-    leave a section blank if the week had no relevant activity.
-
-    sensitivity_tier: 2
-    """
-
-    highlight: str = ""
-    communication: str = ""
-    schedule: str = ""
-    notes: str = ""
-
-
 class RelationshipNudge(AgentOutput):
     """A warm reach-out suggestion authored by
     ``RelationshipTrackerAgent``.
@@ -282,22 +266,6 @@ class RelationshipNudge(AgentOutput):
     contact_name: str
     nudge: str
     suggested_topic: str | None = None
-
-
-class InsightDraft(AgentOutput):
-    """LLM-generated portion of a proactive insight.
-
-    The agent only produces the user-facing prose. ``id``, ``trigger``,
-    ``pattern``, ``generated_at``, ``sensitivity_tier``, ``sources``,
-    and ``domain`` are filled in by the caller from the surrounding
-    context.
-
-    sensitivity_tier: 2
-    """
-
-    title: str
-    content: str
-    suggested_followup: str | None = None
 
 
 class MessageNotification(AgentOutput):
@@ -1072,7 +1040,6 @@ __all__ = [
     "DailySchedule",
     "DatasetSuggestion",
     "DatasetValidationReport",
-    "DigestSummary",
     "DuckDBQuerySpec",
     "EgressDecision",
     "ActionProposalVerdict",
@@ -1088,7 +1055,6 @@ __all__ = [
     "Improvement",
     "InjectionVerdict",
     "Insight",
-    "InsightDraft",
     "LearnedFact",
     "LearnedFactBatch",
     "LearnedFactDraft",

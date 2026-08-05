@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
 from src.core.chromadb.engine import COLLECTION_NAMES, VectorEngine
 from src.core.kuzu.engine import GraphEngine
+from src.core.name_matching import build_unique_index, find_names
 from src.core.profiler import timed
 from src.core.sqlite.engine import DatabaseEngine
 from src.core.topic_loader import load_topic_contacts
@@ -587,12 +589,20 @@ def extract_entities(
     sensitivity_tier: 2
     """
     found: dict[str, str] = {}
+    claimed: set[str] = set()
     combined = " ".join(texts).lower()
 
-    # Strategy 1: match known names
-    for name_variant, node_id in name_to_node_id.items():
-        if name_variant in combined and node_id not in found.values():
-            found[name_variant] = node_id
+    # Strategy 1: match known names as whole words, longest variant
+    # first. Both properties matter for picking the right person:
+    # a substring test lets "ana" match inside "Mariana", and without
+    # longest-first the bare first name can claim a mention that the
+    # full name identifies unambiguously.
+    for name_variant in find_names(list(name_to_node_id), combined):
+        node_id = name_to_node_id[name_variant]
+        if node_id in claimed:
+            continue
+        found[name_variant] = node_id
+        claimed.add(node_id)
 
     # Strategy 2: capitalized words from original texts
     for text in texts:
@@ -603,8 +613,9 @@ def extract_entities(
                 continue
             if lower_word in name_to_node_id:
                 nid = name_to_node_id[lower_word]
-                if nid not in found.values():
+                if nid not in claimed:
                     found[lower_word] = nid
+                    claimed.add(nid)
 
     return list(found.items())
 
@@ -1117,9 +1128,28 @@ class QueryEngine:
     def _build_name_index(self) -> dict[str, str]:
         """Build name variants -> Kuzu Person node ID mapping.
 
+        Variants are accumulated as ``variant -> {owner ids}`` and only
+        the single-owner ones survive (see
+        :func:`~src.core.name_matching.build_unique_index`). Two
+        contacts sharing a first name used to race for that token via
+        ``setdefault``, permanently awarding e.g. ``"ana"`` to whichever
+        was indexed first and mis-resolving every later mention of the
+        other Ana.
+
         sensitivity_tier: 2
         """
-        index: dict[str, str] = {}
+        variants: dict[str, set[str]] = defaultdict(set)
+        # Full names are recorded separately: a full name identifies a
+        # person even when their first name is shared, so it must not be
+        # dropped just because a bare token collides.
+        full_names: dict[str, set[str]] = defaultdict(set)
+
+        def _record(name: str, node_id: str) -> None:
+            lower_name = name.lower()
+            full_names[lower_name].add(node_id)
+            for part in lower_name.split():
+                if len(part) > 2:
+                    variants[part].add(node_id)
 
         if self._kuzu is not None:
             try:
@@ -1128,15 +1158,9 @@ class QueryEngine:
                     "RETURN p.id AS id, p.name AS name",
                 )
                 for person in persons:
-                    node_id = person["id"]
                     name = person.get("name", "")
-                    if not name:
-                        continue
-                    index[name.lower()] = node_id
-                    for part in name.split():
-                        lower = part.lower()
-                        if len(lower) > 2:
-                            index.setdefault(lower, node_id)
+                    if name:
+                        _record(name, person["id"])
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to load Kuzu Person nodes")
 
@@ -1148,23 +1172,22 @@ class QueryEngine:
                 name = contact.get("name", "")
                 if not name:
                     continue
-                lower_name = name.lower()
-                node_id = index.get(lower_name, "")
-                if not node_id:
-                    for part in name.split():
-                        lp = part.lower()
-                        if lp in index:
-                            node_id = index[lp]
+                # Resolve the contact onto an existing Person node by
+                # full name, else by an unambiguous name part.
+                owners = full_names.get(name.lower(), set())
+                if not owners:
+                    for part in name.lower().split():
+                        part_owners = variants.get(part, set())
+                        if len(part_owners) == 1:
+                            owners = part_owners
                             break
-                if node_id:
-                    index.setdefault(lower_name, node_id)
-                    for part in name.split():
-                        lp = part.lower()
-                        if len(lp) > 2:
-                            index.setdefault(lp, node_id)
+                if len(owners) == 1:
+                    _record(name, next(iter(owners)))
         except Exception:  # noqa: BLE001
             logger.warning("Failed to load DuckDB contacts")
 
+        index = build_unique_index(full_names)
+        index.update(build_unique_index(variants))
         return index
 
     # ----------------------------------------------------------

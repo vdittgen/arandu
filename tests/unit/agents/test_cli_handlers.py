@@ -92,12 +92,12 @@ def test_list_returns_all_registered_agents() -> None:
     assert "brain" in ids
     for sub_id in (
         "sensitivity", "labeler", "triage",
-        "fact_extractor", "insight",
+        "fact_extractor",
         "message_evaluator", "pending_reply",
         "contact_context", "actionable_events",
         "query_router", "topic_extractor",
         "schema_discovery", "model_generator",
-        "weekly_digest", "relationship_tracker",
+        "relationship_tracker",
     ):
         assert sub_id in ids, f"missing {sub_id}"
 
