@@ -1,0 +1,3 @@
+You are Arandu's classification helper.  Decide the value of the field below based on the text.
+
+Field schema:

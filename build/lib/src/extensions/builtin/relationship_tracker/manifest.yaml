@@ -1,0 +1,24 @@
+id: relationship-tracker
+name: Relationship Tracker
+version: "1.0.0"
+description: Identifies contacts you haven't interacted with recently
+author: Arandu
+builtin: true
+category: social
+max_sensitivity_tier: 2
+can_use_llm: true
+tables:
+  - table: raw_contacts
+    max_tier: 2
+  - table: raw_messages
+    max_tier: 2
+write_tables:
+  - ext_relationship_tracker_nudges
+triggers:
+  - scheduled
+  - manual
+schedule: "0 8 * * *"
+skills:
+  - summarize-text
+memory_mb: 256
+timeout_seconds: 90

@@ -1,0 +1,1518 @@
+{
+  "version": "1.0.0",
+  "connectors": [
+    {
+      "id": "apple-calendar",
+      "name": "Calendar & Reminders",
+      "category": "apple",
+      "icon": "📅",
+      "description": "Sync macOS Calendar events and Reminders",
+      "command": "python3",
+      "args": [
+        "-m",
+        "src.extensions.bridges.apple.server"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_calendar_events",
+          "tool_type": "data",
+          "target_table": "raw_calendar_events",
+          "fields": [
+            {
+              "source_name": "title",
+              "target_column": "title",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "start_time",
+              "target_column": "start_time",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "end_time",
+              "target_column": "end_time",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "location",
+              "target_column": "location",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "attendees",
+              "target_column": "attendees",
+              "source_type": "array",
+              "target_type": "JSON",
+              "sensitivity_tier": 2,
+              "transform": "json_array"
+            },
+            {
+              "source_name": "description",
+              "target_column": "description",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "is_all_day",
+              "target_column": "is_all_day",
+              "source_type": "boolean",
+              "target_type": "BOOLEAN",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "calendar_name",
+              "target_column": "calendar_name",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "calendar_owner_email",
+              "target_column": "calendar_owner_email",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "is_shared_calendar",
+              "target_column": "is_shared_calendar",
+              "source_type": "integer",
+              "target_type": "INTEGER",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "is_subscribed_calendar",
+              "target_column": "is_subscribed_calendar",
+              "source_type": "integer",
+              "target_type": "INTEGER",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "self_response_status",
+              "target_column": "self_response_status",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "event_origin",
+              "target_column": "event_origin",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 1,
+              "transform": null
+            }
+          ],
+          "dedup_key": [
+            "id"
+          ]
+        },
+        {
+          "tool_name": "list_reminders",
+          "tool_type": "data",
+          "target_table": "raw_reminders",
+          "fields": [
+            {
+              "source_name": "title",
+              "target_column": "title",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "due_date",
+              "target_column": "due_date",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "notes",
+              "target_column": "notes",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "completed",
+              "target_column": "completed",
+              "source_type": "boolean",
+              "target_type": "BOOLEAN",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "list_name",
+              "target_column": "list_name",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            }
+          ],
+          "dedup_key": [
+            "id"
+          ]
+        },
+        {
+          "tool_name": "create_event",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "start_time": {
+                "type": "string"
+              },
+              "end_time": {
+                "type": "string"
+              },
+              "location": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        },
+        {
+          "tool_name": "create_reminder",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "list_name": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "string"
+              },
+              "due_date": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        },
+        {
+          "tool_name": "delete_event",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        },
+        {
+          "tool_name": "delete_reminder",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        }
+      ],
+      "requires_auth": null,
+      "requires_env": {},
+      "requires_app": null,
+      "requires_permission": "Full Disk Access",
+      "default_enabled": true,
+      "default_schedule": "every_15min",
+      "estimated_first_sync_seconds": 15,
+      "platforms": [
+        "macos"
+      ],
+      "min_version": null,
+      "note": "Reads Calendar.sqlitedb directly; needs Full Disk Access. AppleScript used for write operations."
+    },
+    {
+      "id": "apple-contacts",
+      "name": "Contacts",
+      "category": "apple",
+      "icon": "👤",
+      "description": "Sync macOS Contacts",
+      "command": "python3",
+      "args": [
+        "-m",
+        "src.extensions.bridges.apple.server"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_contacts",
+          "tool_type": "data",
+          "target_table": "raw_contacts",
+          "fields": [
+            {
+              "source_name": "name",
+              "target_column": "name",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "email",
+              "target_column": "email",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 3,
+              "transform": null
+            },
+            {
+              "source_name": "phone",
+              "target_column": "phone",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 3,
+              "transform": null
+            },
+            {
+              "source_name": "relationship",
+              "target_column": "relationship",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "birthday",
+              "target_column": "birthday",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 3,
+              "transform": null
+            },
+            {
+              "source_name": "address",
+              "target_column": "address",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 3,
+              "transform": null
+            },
+            {
+              "source_name": "notes",
+              "target_column": "notes",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": null
+            }
+          ],
+          "dedup_key": [
+            "id"
+          ]
+        },
+        {
+          "tool_name": "search_contacts",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "requires_auth": null,
+      "requires_env": {},
+      "requires_app": null,
+      "requires_permission": "Full Disk Access",
+      "default_enabled": true,
+      "default_schedule": "every_15min",
+      "estimated_first_sync_seconds": 5,
+      "platforms": [
+        "macos"
+      ],
+      "min_version": null,
+      "note": "Local SQLite bridge — reads directly from macOS AddressBook database"
+    },
+    {
+      "id": "apple-notes",
+      "name": "Notes",
+      "category": "apple",
+      "icon": "📝",
+      "description": "Sync macOS Notes",
+      "command": "python3",
+      "args": [
+        "-m",
+        "src.extensions.bridges.apple.server"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_notes",
+          "tool_type": "data",
+          "target_table": "raw_notes",
+          "fields": [
+            {
+              "source_name": "title",
+              "target_column": "title",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "content",
+              "target_column": "content",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "source",
+              "target_column": "source",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "created_at",
+              "target_column": "created_at",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 1,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "updated_at",
+              "target_column": "updated_at",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 1,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "tags",
+              "target_column": "tags",
+              "source_type": "array",
+              "target_type": "JSON",
+              "sensitivity_tier": 1,
+              "transform": "json_array"
+            }
+          ],
+          "dedup_key": [
+            "id"
+          ]
+        },
+        {
+          "tool_name": "create_note",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              },
+              "folder": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        },
+        {
+          "tool_name": "search_notes",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "tool_name": "update_note",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "body"
+            ]
+          }
+        },
+        {
+          "tool_name": "delete_note",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        }
+      ],
+      "requires_auth": null,
+      "requires_env": {},
+      "requires_app": null,
+      "requires_permission": "Full Disk Access",
+      "default_enabled": false,
+      "default_schedule": "hourly",
+      "estimated_first_sync_seconds": 5,
+      "platforms": [
+        "macos"
+      ],
+      "min_version": null,
+      "note": "Local SQLite bridge — reads directly from macOS NoteStore database"
+    },
+    {
+      "id": "apple-mail",
+      "name": "Mail",
+      "category": "apple",
+      "icon": "📧",
+      "description": "Sync macOS Mail inbox",
+      "command": "python3",
+      "args": [
+        "-m",
+        "src.extensions.bridges.apple.server"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_emails",
+          "tool_type": "data",
+          "target_table": "raw_emails",
+          "fields": [
+            {
+              "source_name": "subject",
+              "target_column": "subject",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "source",
+              "target_column": "source",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "from_address",
+              "target_column": "from_address",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "to_addresses",
+              "target_column": "to_addresses",
+              "source_type": "array",
+              "target_type": "JSON",
+              "sensitivity_tier": 2,
+              "transform": "json_array"
+            },
+            {
+              "source_name": "date",
+              "target_column": "date",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "body_preview",
+              "target_column": "body_preview",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 3,
+              "transform": null
+            },
+            {
+              "source_name": "is_read",
+              "target_column": "is_read",
+              "source_type": "boolean",
+              "target_type": "BOOLEAN",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "folder",
+              "target_column": "folder",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            }
+          ],
+          "dedup_key": [
+            "id"
+          ]
+        },
+        {
+          "tool_name": "search_emails",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "tool_name": "send_email",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "to": {
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              },
+              "cc": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "to",
+              "subject"
+            ]
+          }
+        },
+        {
+          "tool_name": "reply_email",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "subject": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "subject",
+              "body"
+            ]
+          }
+        },
+        {
+          "tool_name": "delete_email",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "subject"
+            ]
+          }
+        },
+        {
+          "tool_name": "move_email",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "subject": {
+                "type": "string"
+              },
+              "folder": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "subject",
+              "folder"
+            ]
+          }
+        },
+        {
+          "tool_name": "flag_email",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "subject": {
+                "type": "string"
+              },
+              "flagged": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "subject"
+            ]
+          }
+        }
+      ],
+      "requires_auth": null,
+      "requires_env": {},
+      "requires_app": null,
+      "requires_permission": "Full Disk Access",
+      "default_enabled": false,
+      "default_schedule": "hourly",
+      "estimated_first_sync_seconds": 10,
+      "platforms": [
+        "macos"
+      ],
+      "min_version": null,
+      "note": "Reads ~/Library/Mail/.../Envelope Index directly; needs Full Disk Access."
+    },
+    {
+      "id": "apple-messages",
+      "name": "Messages",
+      "category": "apple",
+      "icon": "💬",
+      "description": "Sync iMessage and SMS conversations",
+      "command": "python3",
+      "args": [
+        "-m",
+        "src.extensions.bridges.apple.server"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_messages",
+          "tool_type": "data",
+          "target_table": "raw_messages",
+          "fields": [
+            {
+              "source_name": "sender",
+              "target_column": "sender",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "recipient",
+              "target_column": "recipient",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "content",
+              "target_column": "content",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 3,
+              "transform": null
+            },
+            {
+              "source_name": "source",
+              "target_column": "source",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "timestamp",
+              "target_column": "timestamp",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "is_from_me",
+              "target_column": "is_from_me",
+              "source_type": "boolean",
+              "target_type": "BOOLEAN",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "chat_name",
+              "target_column": "chat_name",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            }
+          ],
+          "dedup_key": [
+            "id"
+          ]
+        },
+        {
+          "tool_name": "send_message",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "to": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "to",
+              "text"
+            ]
+          }
+        }
+      ],
+      "requires_auth": null,
+      "requires_env": {},
+      "requires_app": null,
+      "requires_permission": "Full Disk Access",
+      "default_enabled": false,
+      "default_schedule": "every_15min",
+      "estimated_first_sync_seconds": 5,
+      "platforms": [
+        "macos"
+      ],
+      "min_version": null,
+      "note": "Local SQLite bridge — reads from macOS Messages chat.db. Requires Full Disk Access."
+    },
+    {
+      "id": "google-calendar",
+      "name": "Google Calendar",
+      "category": "google",
+      "icon": "📆",
+      "description": "Sync Google Calendar events",
+      "command": "python3",
+      "args": [
+        "-m",
+        "src.extensions.bridges.google.server"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_calendar_events",
+          "tool_type": "data",
+          "target_table": "raw_calendar_events",
+          "dedup_key": [
+            "id"
+          ],
+          "fields": [
+            {
+              "source_name": "title",
+              "target_column": "title",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "start_time",
+              "target_column": "start_time",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "end_time",
+              "target_column": "end_time",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "location",
+              "target_column": "location",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "attendees",
+              "target_column": "attendees",
+              "source_type": "array",
+              "target_type": "JSON",
+              "sensitivity_tier": 2,
+              "transform": "json_array"
+            },
+            {
+              "source_name": "description",
+              "target_column": "description",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "is_all_day",
+              "target_column": "is_all_day",
+              "source_type": "boolean",
+              "target_type": "BOOLEAN",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "calendar_name",
+              "target_column": "calendar_name",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "self_response_status",
+              "target_column": "self_response_status",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "event_origin",
+              "target_column": "event_origin",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            }
+          ]
+        }
+      ],
+      "requires_permission": null,
+      "requires_auth": "google_oauth",
+      "requires_env": {},
+      "requires_app": null,
+      "platforms": [
+        "macos"
+      ],
+      "min_version": null,
+      "default_enabled": false,
+      "default_schedule": "every_15min",
+      "estimated_first_sync_seconds": 45,
+      "note": "Authorize Google once; recurring events are expanded into instances."
+    },
+    {
+      "id": "google-gmail",
+      "name": "Gmail",
+      "category": "google",
+      "icon": "✉️",
+      "description": "Sync Gmail message metadata (subject, sender, snippet)",
+      "command": "python3",
+      "args": [
+        "-m",
+        "src.extensions.bridges.google.server"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_emails",
+          "tool_type": "data",
+          "target_table": "raw_emails",
+          "dedup_key": [
+            "id"
+          ],
+          "fields": [
+            {
+              "source_name": "subject",
+              "target_column": "subject",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "source",
+              "target_column": "source",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "from_address",
+              "target_column": "from_address",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "to_addresses",
+              "target_column": "to_addresses",
+              "source_type": "array",
+              "target_type": "JSON",
+              "sensitivity_tier": 2,
+              "transform": "json_array"
+            },
+            {
+              "source_name": "date",
+              "target_column": "date",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "body_preview",
+              "target_column": "body_preview",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 3,
+              "transform": null
+            },
+            {
+              "source_name": "is_read",
+              "target_column": "is_read",
+              "source_type": "boolean",
+              "target_type": "BOOLEAN",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "folder",
+              "target_column": "folder",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            }
+          ]
+        }
+      ],
+      "requires_permission": null,
+      "requires_auth": "google_oauth",
+      "requires_env": {},
+      "requires_app": null,
+      "platforms": [
+        "macos"
+      ],
+      "min_version": null,
+      "default_enabled": false,
+      "default_schedule": "hourly",
+      "estimated_first_sync_seconds": 90,
+      "note": "Metadata and snippet only — message bodies are never fetched."
+    },
+    {
+      "id": "filesystem",
+      "name": "Files & Documents",
+      "category": "files",
+      "icon": "📁",
+      "description": "Index files from Documents and Desktop",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "~/Documents",
+        "~/Desktop"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_directory",
+          "tool_type": "data",
+          "target_table": "raw_files",
+          "fields": [
+            {
+              "source_name": "filename",
+              "target_column": "filename",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "filepath",
+              "target_column": "filepath",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "filetype",
+              "target_column": "filetype",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "size_bytes",
+              "target_column": "size_bytes",
+              "source_type": "number",
+              "target_type": "BIGINT",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "created_at",
+              "target_column": "created_at",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 1,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "modified_at",
+              "target_column": "modified_at",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 1,
+              "transform": "iso_to_timestamp"
+            }
+          ],
+          "dedup_key": [
+            "filepath"
+          ]
+        },
+        {
+          "tool_name": "read_file",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "tool_name": "write_file",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "content"
+            ]
+          }
+        }
+      ],
+      "requires_auth": null,
+      "requires_env": {},
+      "requires_app": null,
+      "requires_permission": null,
+      "default_enabled": true,
+      "default_schedule": "hourly",
+      "estimated_first_sync_seconds": 60,
+      "platforms": [
+        "macos",
+        "linux",
+        "windows"
+      ],
+      "min_version": null,
+      "note": null
+    },
+    {
+      "id": "whatsapp",
+      "name": "WhatsApp",
+      "category": "email",
+      "icon": "📱",
+      "description": "Sync WhatsApp chats and messages",
+      "command": "node",
+      "args": [
+        "src/extensions/bridges/whatsapp/node/client.js"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "list_chats",
+          "tool_type": "data",
+          "target_table": "raw_messages",
+          "fields": [
+            {
+              "source_name": "sender",
+              "target_column": "sender",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "recipient",
+              "target_column": "recipient",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "content",
+              "target_column": "content",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 3,
+              "transform": null
+            },
+            {
+              "source_name": "source",
+              "target_column": "source",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "timestamp",
+              "target_column": "timestamp",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "is_from_me",
+              "target_column": "is_from_me",
+              "source_type": "boolean",
+              "target_type": "BOOLEAN",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "chat_name",
+              "target_column": "chat_name",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            },
+            {
+              "source_name": "is_group",
+              "target_column": "is_group",
+              "source_type": "boolean",
+              "target_type": "BOOLEAN",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "sender_name",
+              "target_column": "sender_name",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 2,
+              "transform": null
+            }
+          ],
+          "dedup_key": [
+            "id",
+            "source"
+          ]
+        },
+        {
+          "tool_name": "send_message",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "to": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "to",
+              "text"
+            ]
+          }
+        }
+      ],
+      "requires_auth": null,
+      "requires_env": {},
+      "requires_app": null,
+      "requires_permission": null,
+      "default_enabled": false,
+      "default_schedule": "every_15min",
+      "estimated_first_sync_seconds": 30,
+      "platforms": [
+        "macos",
+        "linux",
+        "windows"
+      ],
+      "min_version": null,
+      "note": "Requires one-time QR pairing (WhatsApp Web / Baileys)"
+    },
+    {
+      "id": "spotify",
+      "name": "Spotify",
+      "category": "lifestyle",
+      "icon": "🎵",
+      "description": "Track listening history from Spotify",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-server-spotify"
+      ],
+      "transport": "stdio",
+      "tools": [
+        {
+          "tool_name": "get_recently_played",
+          "tool_type": "data",
+          "target_table": "raw_listening_history",
+          "fields": [
+            {
+              "source_name": "track_name",
+              "target_column": "track_name",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "artist",
+              "target_column": "artist",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "album",
+              "target_column": "album",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "played_at",
+              "target_column": "played_at",
+              "source_type": "string",
+              "target_type": "TEXT",
+              "sensitivity_tier": 2,
+              "transform": "iso_to_timestamp"
+            },
+            {
+              "source_name": "duration_ms",
+              "target_column": "duration_ms",
+              "source_type": "number",
+              "target_type": "INTEGER",
+              "sensitivity_tier": 1,
+              "transform": null
+            },
+            {
+              "source_name": "context_type",
+              "target_column": "context_type",
+              "source_type": "string",
+              "target_type": "VARCHAR",
+              "sensitivity_tier": 1,
+              "transform": null
+            }
+          ],
+          "dedup_key": [
+            "track_name",
+            "played_at"
+          ]
+        },
+        {
+          "tool_name": "get_current_playback",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "tool_name": "play_track",
+          "tool_type": "action",
+          "target_table": null,
+          "fields": [],
+          "dedup_key": [],
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "requires_auth": "spotify_oauth",
+      "requires_env": {},
+      "requires_app": null,
+      "requires_permission": null,
+      "default_enabled": false,
+      "default_schedule": "hourly",
+      "estimated_first_sync_seconds": 15,
+      "platforms": [
+        "macos",
+        "linux",
+        "windows"
+      ],
+      "min_version": null,
+      "note": null
+    }
+  ]
+}
