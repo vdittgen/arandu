@@ -9,7 +9,7 @@ dependencies = [
     "chromadb>=0.5.0",
     "sqlmesh>=0.100.0",
     "ollama>=0.3.0",
-    "duckduckgo-search>=7.0.0",
+    "duckduckgo-search>=8.1.1",
     "pydantic>=2.7.0",
     # Capped below 2.0: pydantic-ai 2.x renamed `OpenAIModel` to
     # `OpenAIChatModel` and turned `ModelProfile` from a dataclass into a
