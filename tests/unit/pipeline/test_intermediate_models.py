@@ -543,3 +543,105 @@ class TestIntDailySummary:
         rows = _run_intermediate(pipeline_db, "int_daily_summary")
         for row in rows:
             assert row["sensitivity_tier"] == 3
+
+
+class TestIntEventsEnrichedCircuitBreaker:
+    """A failing provider must not re-fire the whole backlog every run.
+
+    Failures are deliberately not cached so a transient glitch retries.
+    Without a breaker that turns a *persistent* failure into one paid
+    LLM call per uncached event, on every run, indefinitely — observed
+    in production as batches of exactly 70 identical 404s.
+    """
+
+    @staticmethod
+    def _run_with_failing_agent(
+        engine: DatabaseEngine,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        fail_all: bool = True,
+    ) -> tuple[list[dict], int]:
+        """Run the model with a categorizer that raises. Returns rows + calls."""
+        from src.agents.event_categorizer import agent as agent_module
+        from src.pipeline.intermediate import int_events_enriched as model
+
+        calls = {"n": 0}
+
+        def _boom(self: t.Any, **_kwargs: t.Any) -> t.Any:
+            calls["n"] += 1
+            msg = "model 'arandu-pro' not found"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(
+            agent_module.EventCategorizerAgent, "categorize", _boom,
+        )
+        rows = model.execute(engine)
+        return rows, calls["n"]
+
+    def test_breaker_caps_calls_when_the_provider_is_down(
+        self, pipeline_db: DatabaseEngine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.pipeline.intermediate import int_events_enriched as model
+
+        rows, calls = self._run_with_failing_agent(pipeline_db, monkeypatch)
+        # Every event still gets a row — the marts must not go hungry.
+        assert rows
+        # ...but the LLM was called only until the breaker tripped.
+        assert calls == model._CONSECUTIVE_FAILURE_LIMIT, (
+            f"expected the breaker to stop after "
+            f"{model._CONSECUTIVE_FAILURE_LIMIT} consecutive failures, "
+            f"but the agent was called {calls} times"
+        )
+
+    def test_every_row_falls_back_when_breaker_trips(
+        self, pipeline_db: DatabaseEngine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.pipeline.intermediate import int_events_enriched as model
+
+        rows, _ = self._run_with_failing_agent(pipeline_db, monkeypatch)
+        assert all(
+            r["event_category"] == model._FALLBACK_CATEGORY for r in rows
+        )
+
+    def test_failures_are_still_not_cached(
+        self, pipeline_db: DatabaseEngine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A recovered provider must re-categorise, not inherit fallbacks."""
+        from src.pipeline.intermediate import int_events_enriched as model
+
+        self._run_with_failing_agent(pipeline_db, monkeypatch)
+        rows = _run_events_intermediate(pipeline_db, monkeypatch)
+        assert any(
+            r["event_category"] != model._FALLBACK_CATEGORY for r in rows
+        ), "after recovery the events should be categorised, not stuck"
+
+    def test_isolated_failure_does_not_trip_the_breaker(
+        self, pipeline_db: DatabaseEngine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One bad event is the event's problem, not the provider's."""
+        from src.agents.core.output_types import EventCategoryDecision
+        from src.agents.event_categorizer import agent as agent_module
+        from src.pipeline.intermediate import int_events_enriched as model
+
+        calls = {"n": 0}
+
+        def _flaky(self: t.Any, **kwargs: t.Any) -> t.Any:
+            calls["n"] += 1
+            if calls["n"] == 1:  # first event fails, rest succeed
+                msg = "transient"
+                raise RuntimeError(msg)
+            return EventCategoryDecision(category="meeting", reason="ok")
+
+        monkeypatch.setattr(
+            agent_module.EventCategorizerAgent, "categorize", _flaky,
+        )
+        rows = model.execute(pipeline_db)
+        assert calls["n"] > model._CONSECUTIVE_FAILURE_LIMIT, (
+            "a single failure surrounded by successes must not trip the "
+            "breaker — consecutive failures are the signal"
+        )
+        assert rows

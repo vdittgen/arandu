@@ -36,6 +36,20 @@ _FALLBACK_REASON = "fallback: llm unavailable"
 # a calendar import doesn't fan out into hundreds of calls in one go.
 _MAX_LLM_CALLS_PER_RUN = 200
 
+# Circuit breaker. Failures are deliberately not cached (see `execute`)
+# so a flaky call retries next run — correct for a transient glitch,
+# ruinous for a persistent one: when the provider is misrouted or down,
+# *every* uncached event fails and the whole backlog re-fires on every
+# run, forever. Observed as batches of exactly 70 failures per run for
+# days, each one a paid round trip in cloud mode.
+#
+# Consecutive failures are the signal. One event failing is the event's
+# problem; three in a row is the provider's, and the remaining events
+# will fail identically. Stop calling for the rest of the run and take
+# the fallback — the same thing the per-run cap already does, so the
+# marts still get complete rows.
+_CONSECUTIVE_FAILURE_LIMIT = 3
+
 # Cache version — bump when the prompt changes so old verdicts are
 # re-evaluated against the new system prompt.
 _CACHE_VERSION = "v1"
@@ -308,6 +322,8 @@ def execute(db: DatabaseEngine) -> list[dict[str, t.Any]]:
     llm_calls = 0
     cache_hits = 0
     fallbacks = 0
+    consecutive_failures = 0
+    breaker_tripped = False
 
     for event in events:
         event_id = str(event.get("id") or "")
@@ -330,20 +346,41 @@ def execute(db: DatabaseEngine) -> list[dict[str, t.Any]]:
             fallbacks += 1
             continue
 
+        if breaker_tripped:
+            # Provider is failing; every remaining call would fail the
+            # same way. Emit the fallback without spending the call.
+            rows.append(_build_row(event, _FALLBACK_CATEGORY))
+            fallbacks += 1
+            continue
+
         verdict = _categorize_via_llm(event)
         llm_calls += 1
         if verdict is None:
+            consecutive_failures += 1
+            if consecutive_failures >= _CONSECUTIVE_FAILURE_LIMIT:
+                breaker_tripped = True
+                logger.error(
+                    "int_events_enriched: %d consecutive categoriser "
+                    "failures — tripping the circuit breaker and "
+                    "deferring the remaining events to the next run. "
+                    "This usually means the LLM provider is "
+                    "unreachable or misrouted, not that the events "
+                    "are bad.",
+                    consecutive_failures,
+                )
             rows.append(_build_row(event, _FALLBACK_CATEGORY))
             fallbacks += 1
             # Don't cache fallback verdicts — we want to retry next run.
             continue
+        consecutive_failures = 0
         category, reason = verdict
         rows.append(_build_row(event, category))
         _store_cache(db, event_id, fingerprint, category, reason)
 
     logger.info(
         "int_events_enriched: %d events (%d cache hits, %d LLM calls, "
-        "%d fallbacks)",
+        "%d fallbacks%s)",
         len(rows), cache_hits, llm_calls, fallbacks,
+        ", circuit breaker tripped" if breaker_tripped else "",
     )
     return rows
