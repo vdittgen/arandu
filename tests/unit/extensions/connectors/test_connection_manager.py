@@ -784,3 +784,57 @@ class TestSyncEngineWiring:
             db_engine=None,
         )
         assert mgr._sync_engine is None
+
+
+class TestOAuthTriggerContract:
+    """The keys the UI sends must be the keys the manager acts on.
+
+    Regression: the Extensions page rendered an ``oauth`` requirement's
+    label as plain text with no control, and its "Retry Connection"
+    button forwarded only the ``env`` inputs. So nothing ever set
+    ``start_oauth``, the PKCE flow was never launched, and the Google
+    connectors sat on "Setup Required" / "Error" indefinitely — the
+    retry just re-ran the check and found the same missing token.
+
+    These pin the contract from the UI's side: given exactly what the
+    button now sends, the flow must start.
+    """
+
+    @staticmethod
+    def _hydrate(manager: ConnectionManager, user_inputs: dict) -> bool:
+        """Run the oauth hydration and report whether the flow started."""
+        template = next(
+            (t for t in manager.catalog.all
+             if getattr(t, "requires_auth", None)),
+            None,
+        )
+        if template is None:  # pragma: no cover - catalog has no oauth
+            pytest.skip("no oauth connector in the catalog")
+
+        with (
+            patch.object(
+                RequirementChecker, "check_oauth", return_value=False,
+            ),
+            patch.object(
+                RequirementChecker, "start_oauth_flow",
+            ) as mock_flow,
+        ):
+            mock_flow.return_value = type(
+                "R", (), {"success": True, "error": None},
+            )()
+            manager._hydrate_oauth_requirements(template, user_inputs)
+            return mock_flow.called
+
+    def test_button_payload_starts_the_flow(
+        self, manager: ConnectionManager,
+    ) -> None:
+        """Exactly what the Sign-in button sends must launch PKCE."""
+        assert self._hydrate(
+            manager, {"start_oauth": "true", "oauth_provider": "google_oauth"},
+        ) is True
+
+    def test_env_only_payload_does_not_start_the_flow(
+        self, manager: ConnectionManager,
+    ) -> None:
+        """The old Retry payload — this is what left it stuck."""
+        assert self._hydrate(manager, {"some_env_key": "value"}) is False
