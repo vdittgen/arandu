@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -165,7 +165,7 @@ class ConnectionManager:
             )
 
         # Allow the caller to provide OAuth material in user_inputs.
-        self._hydrate_oauth_requirements(template, user_inputs)
+        oauth_error = self._hydrate_oauth_requirements(template, user_inputs)
 
         # Step 1: Check requirements
         req_status = self.checker.check_all(
@@ -196,6 +196,17 @@ class ConnectionManager:
                 for m in req_status.missing
             )
             if not only_permission_missing or has_manual_grant_permission:
+                if oauth_error:
+                    # Attach the real reason to the requirement the user
+                    # is looking at, instead of leaving them to guess.
+                    req_status = replace(
+                        req_status,
+                        missing=[
+                            replace(m, label=f"{m.label} — {oauth_error}")
+                            if m.requirement_type == "oauth" else m
+                            for m in req_status.missing
+                        ],
+                    )
                 self.registry.register_needs_setup(
                     connector_id,
                     missing=[
@@ -931,8 +942,15 @@ class ConnectionManager:
         self,
         template: ConnectorTemplate,
         user_inputs: dict[str, Any],
-    ) -> None:
-        """Store OAuth tokens or trigger flow when requested by user inputs."""
+    ) -> str | None:
+        """Store OAuth tokens or trigger flow when requested by user inputs.
+
+        Returns an error message when a requested flow failed, so the
+        caller can surface it. Previously the failure was only logged,
+        to stderr the bundled app does not capture — so a connector
+        whose OAuth provider is unconfigured just sat on "Setup
+        Required" with nothing explaining why.
+        """
         provider = template.requires_auth
         if not provider:
             return
@@ -957,8 +975,9 @@ class ConnectionManager:
         if trigger in (True, "true", "1", provider):
             oauth_result = self.checker.start_oauth_flow(provider)
             if not oauth_result.success:
+                reason = oauth_result.error or "unknown error"
                 logger.warning(
-                    "OAuth flow failed for %s: %s",
-                    provider,
-                    oauth_result.error or "unknown error",
+                    "OAuth flow failed for %s: %s", provider, reason,
                 )
+                return f"Sign-in could not start: {reason}"
+        return None

@@ -712,6 +712,29 @@ function ConnectorRow({
                       <ExternalLink className="h-3 w-3" />
                     </button>
                   )}
+                  {req.type === "oauth" && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // `start_oauth` is what actually launches the
+                        // PKCE flow — see
+                        // ConnectionManager._hydrate_oauth_requirements.
+                        // Without it the retry below only re-runs the
+                        // requirements check, which finds the same
+                        // missing token and leaves the connector stuck
+                        // on "Setup Required" forever.
+                        onToggleWithInputs({
+                          ...envValues,
+                          start_oauth: "true",
+                          oauth_provider: req.key,
+                        });
+                      }}
+                      className="ml-5 inline-flex items-center gap-1 text-xs text-indigo transition-colors hover:text-indigo/80"
+                    >
+                      {req.label}
+                      <ExternalLink className="h-3 w-3" />
+                    </button>
+                  )}
                   {req.type === "env" && (
                     <div className="flex items-center gap-2 pl-5">
                       <input
